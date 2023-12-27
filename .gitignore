@@ -1,0 +1,11 @@
+/Cargo.lock
+/artifacts
+/target
+/schema
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+\#*\#
+.\#*

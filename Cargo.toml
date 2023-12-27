@@ -1,0 +1,36 @@
+[package]
+name = "banana-vault"
+version = "0.1.0"
+edition = "2021"
+authors = ["Banana DAO"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[profile.release]
+opt-level = 3
+debug = false
+rpath = false
+lto = true
+debug-assertions = false
+codegen-units = 1
+panic = 'abort'
+incremental = false
+overflow-checks = true
+
+[dependencies]
+cosmwasm-schema = "1.5.0"
+cosmwasm-std = "1.5.0"
+cw-ownable = "0.5.1"
+cw-storage-plus = "1.2.0"
+cw-utils = "1.0.3"
+cw2 = "1.1.2"
+osmosis-std = "0.21.0"
+serde = { version = "1.0.193", features = ["derive"] }
+thiserror = "1.0.52"
+pyth-sdk-cw = "1.2.0"
+prost = "0.12.3"
+
+[dev-dependencies]
+osmosis-test-tube = "21.0.0"
