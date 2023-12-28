@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     error::ContractError,
-    msg::{ActiveVaultAssetsResponse, ExecuteMsg, Frequency, InstantiateMsg, QueryMsg},
+    msg::{ActiveVaultAssetsResponse, ExecuteMsg, Frequency, InstantiateMsg, QueryMsg, MigrateMsg},
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
         CONFIG, LAST_UPDATE, VAULT_RATIO,
@@ -10,9 +10,9 @@ use crate::{
 };
 use cosmwasm_std::{
     coin, entry_point, to_json_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Decimal, Deps,
-    DepsMut, Env, MessageInfo, Order, Response, StdResult, Storage, Uint128, WasmMsg,
+    DepsMut, Env, MessageInfo, Order, Response, StdResult, Storage, Uint128, WasmMsg, StdError,
 };
-use cw2::set_contract_version;
+use cw2::{set_contract_version, get_contract_version};
 use cw_ownable::{assert_owner, get_ownership, initialize_owner, update_ownership, Action};
 use osmosis_std::types::osmosis::{
     concentratedliquidity::v1beta1::{
@@ -325,7 +325,7 @@ fn execute_create_position(
     )?;
     let balance_asset2 = deps
         .querier
-        .query_balance(env.contract.address, config.asset2.denom.to_owned())?;
+        .query_balance(env.contract.address.to_owned(), config.asset2.denom.to_owned())?;
 
     verify_availability_of_funds(
         deps.storage,
@@ -336,7 +336,7 @@ fn execute_create_position(
 
     let msg_add_position: CosmosMsg = MsgCreatePosition {
         pool_id: CONFIG.load(deps.storage)?.pool_id,
-        sender: info.sender.to_string(),
+        sender: env.contract.address.to_string(),
         lower_tick,
         upper_tick,
         tokens_provided: tokens_provided
@@ -419,7 +419,7 @@ fn execute_withdraw_position(
 
     let msg_withdraw_position: CosmosMsg = MsgWithdrawPosition {
         position_id,
-        sender: info.sender.to_string(),
+        sender: env.contract.address.to_string(),
         liquidity_amount,
     }
     .into();
@@ -740,7 +740,7 @@ fn execute_swap_exact_amount_in(
     }
 
     let msg_swap_exact_amount_in: CosmosMsg = MsgSwapExactAmountIn {
-        sender: info.sender.to_string(),
+        sender: env.contract.address.to_string(),
         routes,
         token_in: Some(CosmosCoin {
             denom: token_in.denom,
@@ -878,6 +878,16 @@ fn query_pending_join(deps: Deps, address: Addr) -> StdResult<Vec<Coin>> {
 fn query_vault_ratio(deps: Deps, address: Addr) -> StdResult<Decimal> {
     let ratio = VAULT_RATIO.load(deps.storage, address)?;
     Ok(ratio)
+}
+
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response> {
+    let version = get_contract_version(deps.storage)?;
+    if version.contract != CONTRACT_NAME {
+        return Err(StdError::generic_err("Can only upgrade from same type"));
+    }
+    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    Ok(Response::default())
 }
 
 // Helpers

@@ -104,3 +104,6 @@ pub struct ActiveVaultAssetsResponse {
     pub asset1: Coin,
     pub asset2: Coin,
 }
+
+#[cw_serde]
+pub struct MigrateMsg {}
