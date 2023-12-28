@@ -439,12 +439,12 @@ fn execute_withdraw_position(
 
     match config.update_frequency {
         Frequency::Blocks(blocks) => {
-            if env.block.height < last_update + blocks {
+            if env.block.height >= last_update + blocks {
                 response = response.add_message(update_users_msg)
             }
         }
         Frequency::Seconds(seconds) => {
-            if env.block.time.seconds() < last_update + seconds {
+            if env.block.time.seconds() >= last_update + seconds {
                 response = response.add_message(update_users_msg)
             }
         }
