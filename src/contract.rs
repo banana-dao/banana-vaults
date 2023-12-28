@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     error::ContractError,
-    msg::{ActiveVaultAssetsResponse, ExecuteMsg, Frequency, InstantiateMsg, QueryMsg, MigrateMsg},
+    msg::{ActiveVaultAssetsResponse, ExecuteMsg, Frequency, InstantiateMsg, MigrateMsg, QueryMsg},
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
         CONFIG, LAST_UPDATE, VAULT_RATIO,
@@ -10,9 +10,9 @@ use crate::{
 };
 use cosmwasm_std::{
     coin, entry_point, to_json_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Decimal, Deps,
-    DepsMut, Env, MessageInfo, Order, Response, StdResult, Storage, Uint128, WasmMsg, StdError,
+    DepsMut, Env, MessageInfo, Order, Response, StdError, StdResult, Storage, Uint128, WasmMsg,
 };
-use cw2::{set_contract_version, get_contract_version};
+use cw2::{get_contract_version, set_contract_version};
 use cw_ownable::{assert_owner, get_ownership, initialize_owner, update_ownership, Action};
 use osmosis_std::types::osmosis::{
     concentratedliquidity::v1beta1::{
@@ -323,9 +323,10 @@ fn execute_create_position(
         env.contract.address.to_owned(),
         config.asset1.denom.to_owned(),
     )?;
-    let balance_asset2 = deps
-        .querier
-        .query_balance(env.contract.address.to_owned(), config.asset2.denom.to_owned())?;
+    let balance_asset2 = deps.querier.query_balance(
+        env.contract.address.to_owned(),
+        config.asset2.denom.to_owned(),
+    )?;
 
     verify_availability_of_funds(
         deps.storage,
@@ -941,13 +942,16 @@ fn verify_availability_of_funds(
     );
 
     for token_provided in tokens_provided.iter() {
-        if token_provided.denom == config.asset1.denom {
-            if token_provided.amount > available_to_add_asset1.amount {
-                return Err(ContractError::CannotAddMoreThenAvailableForAsset {
-                    asset: config.asset1.denom,
-                });
-            }
-        } else if token_provided.amount > available_to_add_asset2.amount {
+        if token_provided.denom == config.asset1.denom
+            && token_provided.amount > available_to_add_asset1.amount
+        {
+            return Err(ContractError::CannotAddMoreThenAvailableForAsset {
+                asset: config.asset1.denom,
+            });
+        }
+        if token_provided.denom == config.asset2.denom
+            && token_provided.amount > available_to_add_asset2.amount
+        {
             return Err(ContractError::CannotAddMoreThenAvailableForAsset {
                 asset: config.asset2.denom,
             });
