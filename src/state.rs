@@ -57,7 +57,7 @@ pub struct Config {
     pub pool_id: u64,
     pub asset1: PythAsset,
     pub asset2: PythAsset,
-    pub dollar_cap: Option<u32>,
+    pub dollar_cap: Option<u64>,
     pub pyth_contract_address: Addr,
     pub update_frequency: Frequency,
     pub exit_commission: Option<Decimal>,

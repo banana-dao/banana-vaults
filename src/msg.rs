@@ -16,7 +16,7 @@ pub struct InstantiateMsg {
     // CL Assets with their corresponding pyth price feed
     pub asset1: PythAsset,
     pub asset2: PythAsset,
-    pub dollar_cap: Option<u32>,  // with 8 decimals. Example: If vault cap is 50k USD we pass here 50000 * 10^8 = 5000000000000
+    pub dollar_cap: Option<u64>,  // with 8 decimals. Example: If vault cap is 50k USD we pass here 50000 * 10^8 = 5000000000000
     // Exit vault commission (in %)
     pub exit_commission: Option<Decimal>,
     // If no address specified, contract admin will be receiver of commissions

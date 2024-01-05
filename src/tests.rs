@@ -32,7 +32,7 @@ mod tests {
         update_frequency: Frequency,
         asset1: PythAsset,
         asset2: PythAsset,
-        dollar_cap: Option<u32>,
+        dollar_cap: Option<u64>,
         exit_commission: Option<Decimal>,
         commission_receiver: Option<Addr>,
         funds: Vec<Coin>,
