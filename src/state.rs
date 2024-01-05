@@ -15,6 +15,8 @@ pub enum TopKey {
     AccountsPendingActivation = b'h',
     CurrentPositions = b'i',
     AddressesWaitingForExit = b'j',
+    HaltExitsAndJoins = b'k',
+    CapReached = b'l',
 }
 
 impl TopKey {
@@ -42,13 +44,19 @@ pub const ACCOUNTS_PENDING_ACTIVATION: Map<Addr, Vec<Coin>> =
 // Addresses pending to leave the vault
 pub const ADDRESSES_WAITING_FOR_EXIT: Item<Vec<Addr>> =
     Item::new(TopKey::AddressesWaitingForExit.as_str());
+// Flag to halt joins and exits (in case of some emergency)
+pub const HALT_EXITS_AND_JOINS: Item<bool> = Item::new(TopKey::HaltExitsAndJoins.as_str());
+// Flag to indicate if the vault cap has been reached and no more people can join (they can leave though)
+pub const CAP_REACHED: Item<bool> = Item::new(TopKey::CapReached.as_str());
 
 #[cw_serde]
 pub struct Config {
     pub pool_id: u64,
     pub asset1: PythAsset,
     pub asset2: PythAsset,
+    pub dollar_cap: Option<u32>,
     pub pyth_contract_address: Addr,
     pub update_frequency: Frequency,
     pub exit_commission: Option<Decimal>,
+    pub commission_receiver: Addr,
 }

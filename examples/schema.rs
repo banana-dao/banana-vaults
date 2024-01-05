@@ -1,4 +1,4 @@
-use banana_vault::msg::{ExecuteMsg, InstantiateMsg, QueryMsg, MigrateMsg};
+use banana_vault::msg::{ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
 use cosmwasm_schema::write_api;
 
 //run cargo schema to generate

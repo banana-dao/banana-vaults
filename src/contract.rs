@@ -5,7 +5,7 @@ use crate::{
     msg::{ActiveVaultAssetsResponse, ExecuteMsg, Frequency, InstantiateMsg, MigrateMsg, QueryMsg},
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
-        CONFIG, LAST_UPDATE, VAULT_RATIO,
+        CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_UPDATE, VAULT_RATIO,
     },
 };
 use cosmwasm_std::{
@@ -14,7 +14,7 @@ use cosmwasm_std::{
 };
 use cw2::{get_contract_version, set_contract_version};
 use cw_ownable::{assert_owner, get_ownership, initialize_owner, update_ownership, Action};
-use osmosis_std::types::osmosis::{
+use osmosis_std_modified::types::osmosis::{
     concentratedliquidity::v1beta1::{
         ConcentratedliquidityQuerier, MsgAddToPosition, MsgCreatePosition, Pool,
     },
@@ -24,7 +24,7 @@ use osmosis_std::types::osmosis::{
         SwapAmountInSplitRoute,
     },
 };
-use osmosis_std::types::{
+use osmosis_std_modified::types::{
     cosmos::base::v1beta1::Coin as CosmosCoin,
     osmosis::concentratedliquidity::v1beta1::MsgWithdrawPosition,
 };
@@ -80,9 +80,11 @@ pub fn instantiate(
         pool_id: msg.pool_id,
         asset1: msg.asset1,
         asset2: msg.asset2,
+        dollar_cap: msg.dollar_cap,
         pyth_contract_address: Addr::unchecked(pyth_contract_address),
         update_frequency: msg.update_frequency.to_owned(),
         exit_commission: msg.exit_commission,
+        commission_receiver: msg.commission_receiver.unwrap_or(info.sender.to_owned()),
     };
 
     // Check that the assets in the pool are the same assets we sent in the instantiate message
@@ -109,6 +111,9 @@ pub fn instantiate(
             LAST_UPDATE.save(deps.storage, &env.block.time.seconds())?;
         }
     }
+
+    CAP_REACHED.save(deps.storage, &false)?;
+    HALT_EXITS_AND_JOINS.save(deps.storage, &false)?;
 
     Ok(Response::new()
         .add_attribute("action", "instantiate_banana_vault")
@@ -239,6 +244,16 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
     let config = CONFIG.load(deps.storage)?;
     verify_funds(&info, &config)?;
 
+    // Check if vault is halted or cap has been reached
+    if HALT_EXITS_AND_JOINS.load(deps.storage)? {
+        return Err(ContractError::VaultHalted {});
+    }
+
+    // Check if vault cap has been reached
+    if CAP_REACHED.load(deps.storage)? {
+        return Err(ContractError::CapReached {});
+    }
+
     // We queue up the assets for the next iteration
     let mut assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
     assets_pending[0].amount += info.funds[0].amount;
@@ -271,6 +286,11 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
 fn execute_leave(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
     // If user wants to leave, we return any pending joining assets and add him in the list for leaving the vault if he has active assets in it
     let mut response = Response::new();
+
+    // Check if vault is not halted for security reasons
+    if HALT_EXITS_AND_JOINS.load(deps.storage)? {
+        return Err(ContractError::VaultHalted {});
+    }
 
     if let Some(funds) =
         ACCOUNTS_PENDING_ACTIVATION.may_load(deps.storage, info.sender.to_owned())?
@@ -437,15 +457,18 @@ fn execute_withdraw_position(
         funds: vec![],
     });
 
-    match config.update_frequency {
-        Frequency::Blocks(blocks) => {
-            if env.block.height >= last_update + blocks {
-                response = response.add_message(update_users_msg)
+    // We can only update if it's time for update and if vault is not halted
+    if !HALT_EXITS_AND_JOINS.load(deps.storage)? {
+        match config.update_frequency {
+            Frequency::Blocks(blocks) => {
+                if env.block.height >= last_update + blocks {
+                    response = response.add_message(update_users_msg)
+                }
             }
-        }
-        Frequency::Seconds(seconds) => {
-            if env.block.time.seconds() >= last_update + seconds {
-                response = response.add_message(update_users_msg)
+            Frequency::Seconds(seconds) => {
+                if env.block.time.seconds() >= last_update + seconds {
+                    response = response.add_message(update_users_msg)
+                }
             }
         }
     }
@@ -551,7 +574,7 @@ fn execute_process_new_entries_and_exits(
         }
 
         // Add the commission message for vault owner
-        let owner = get_ownership(deps.storage)?;
+        let owner = config.commission_receiver;
         let mut coins_for_owner = vec![];
         if total_commission_asset1.gt(&Uint128::zero()) {
             coins_for_owner.push(coin(
@@ -568,7 +591,7 @@ fn execute_process_new_entries_and_exits(
 
         if !coins_for_owner.is_empty() {
             let send_msg = BankMsg::Send {
-                to_address: owner.owner.unwrap().to_string(),
+                to_address: owner.to_string(),
                 amount: coins_for_owner,
             };
 
@@ -679,6 +702,15 @@ fn execute_process_new_entries_and_exits(
             }
             Frequency::Seconds(_) => {
                 LAST_UPDATE.save(deps.storage, &env.block.time.seconds())?;
+            }
+        }
+
+        // Check that we are not over the vault cap, if that's the case, we will flag it to halt joins until under cap again
+        if let Some(dollar_cap) = config.dollar_cap {
+            if total_dollars_in_vault >= Uint128::new(dollar_cap as u128) {
+                CAP_REACHED.save(deps.storage, &true)?;
+            } else {
+                CAP_REACHED.save(deps.storage, &false)?;
             }
         }
 

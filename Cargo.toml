@@ -26,7 +26,7 @@ cw-ownable = "0.5.1"
 cw-storage-plus = "1.2.0"
 cw-utils = "1.0.3"
 cw2 = "1.1.2"
-osmosis-std = "0.21.0"
+osmosis-std-modified = { version = "0.21.0", path = "./packages/osmosis-std" }
 serde = { version = "1.0.193", features = ["derive"] }
 thiserror = "1.0.52"
 pyth-sdk-cw = "1.2.0"
@@ -34,3 +34,4 @@ prost = "0.12.3"
 
 [dev-dependencies]
 osmosis-test-tube = "21.0.0"
+osmosis-std = "0.21.0"

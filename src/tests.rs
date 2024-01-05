@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use cosmwasm_std::{coin, Coin, Decimal, Uint128};
+    use cosmwasm_std::{coin, Coin, Decimal, Uint128, Addr};
     use osmosis_std::types::{
         cosmos::{bank::v1beta1::QueryBalanceRequest, base::v1beta1::Coin as BankCoin},
         osmosis::{
@@ -32,7 +32,9 @@ mod tests {
         update_frequency: Frequency,
         asset1: PythAsset,
         asset2: PythAsset,
+        dollar_cap: Option<u32>,
         exit_commission: Option<Decimal>,
+        commission_receiver: Option<Addr>,
         funds: Vec<Coin>,
     ) -> String {
         let wasm_byte_code = std::fs::read("./artifacts/banana_vault.wasm").unwrap();
@@ -48,6 +50,8 @@ mod tests {
                 update_frequency,
                 asset1,
                 asset2,
+                dollar_cap,
+                commission_receiver,
                 mainnet: false,
                 exit_commission,
             },
@@ -235,7 +239,9 @@ mod tests {
                 denom: "uosmo".to_string(),
                 identifier: uosmo_identifier.to_owned(),
             },
+            None,
             Some(Decimal::percent(50)),
+            None,
             vec![
                 coin(100_000_000, denom.to_owned()),
                 coin(100_000_000, FEE_DENOM),
@@ -257,7 +263,9 @@ mod tests {
                         denom: denom.to_owned(),
                         identifier: banana_identifier.to_owned(),
                     },
+                    dollar_cap: None,
                     exit_commission: Some(Decimal::percent(50)),
+                    commission_receiver: None,
                     mainnet: false,
                 },
                 None,
@@ -289,7 +297,9 @@ mod tests {
                         denom: "uatom".to_owned(),
                         identifier: banana_identifier.to_owned(),
                     },
+                    dollar_cap: None,
                     exit_commission: Some(Decimal::percent(50)),
+                    commission_receiver: None,
                     mainnet: false,
                 },
                 None,
@@ -321,7 +331,9 @@ mod tests {
                         denom: denom.to_owned(),
                         identifier: banana_identifier.to_owned(),
                     },
+                    dollar_cap: None,
                     exit_commission: Some(Decimal::percent(50)),
+                    commission_receiver: None,
                     mainnet: false,
                 },
                 None,

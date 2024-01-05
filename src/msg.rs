@@ -1,7 +1,7 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Addr, Coin, Decimal};
 use cw_ownable::{cw_ownable_execute, cw_ownable_query};
-use osmosis_std::types::osmosis::poolmanager::v1beta1::{
+use osmosis_std_modified::types::osmosis::poolmanager::v1beta1::{
     SwapAmountInRoute, SwapAmountInSplitRoute,
 };
 use pyth_sdk_cw::PriceIdentifier;
@@ -16,8 +16,11 @@ pub struct InstantiateMsg {
     // CL Assets with their corresponding pyth price feed
     pub asset1: PythAsset,
     pub asset2: PythAsset,
+    pub dollar_cap: Option<u32>,  // with 8 decimals. Example: If vault cap is 50k USD we pass here 50000 * 10^8 = 5000000000000
     // Exit vault commission (in %)
     pub exit_commission: Option<Decimal>,
+    // If no address specified, contract admin will be receiver of commissions
+    pub commission_receiver: Option<Addr>,
     // Flag to take the right pyth contract address - true for mainnet, false for testnet
     pub mainnet: bool,
 }
