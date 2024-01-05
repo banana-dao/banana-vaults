@@ -1,5 +1,5 @@
 use cosmwasm_schema::cw_serde;
-use cosmwasm_std::{Addr, Coin, Decimal};
+use cosmwasm_std::{Addr, Coin, Decimal, Uint128};
 use cw_storage_plus::{Item, Map};
 
 use crate::msg::{Frequency, PythAsset};
@@ -17,6 +17,7 @@ pub enum TopKey {
     AddressesWaitingForExit = b'j',
     HaltExitsAndJoins = b'k',
     CapReached = b'l',
+    TotalActiveInDollars = b'm',
 }
 
 impl TopKey {
@@ -48,6 +49,8 @@ pub const ADDRESSES_WAITING_FOR_EXIT: Item<Vec<Addr>> =
 pub const HALT_EXITS_AND_JOINS: Item<bool> = Item::new(TopKey::HaltExitsAndJoins.as_str());
 // Flag to indicate if the vault cap has been reached and no more people can join (they can leave though)
 pub const CAP_REACHED: Item<bool> = Item::new(TopKey::CapReached.as_str());
+// Total amount of active assets in dollars right now
+pub const TOTAL_ACTIVE_IN_DOLLARS: Item<Uint128> = Item::new(TopKey::TotalActiveInDollars.as_str());
 
 #[cw_serde]
 pub struct Config {

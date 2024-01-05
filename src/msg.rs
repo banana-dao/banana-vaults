@@ -1,5 +1,5 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
-use cosmwasm_std::{Addr, Coin, Decimal};
+use cosmwasm_std::{Addr, Coin, Decimal, Uint128};
 use cw_ownable::{cw_ownable_execute, cw_ownable_query};
 use osmosis_std_modified::types::osmosis::poolmanager::v1beta1::{
     SwapAmountInRoute, SwapAmountInSplitRoute,
@@ -83,6 +83,9 @@ pub enum ExecuteMsg {
     Join {},
     // Leave vault,
     Leave {},
+    // Halt and Resume for Admin
+    Halt {},
+    Resume {},
 }
 
 #[cw_ownable_query]
@@ -100,6 +103,8 @@ pub enum QueryMsg {
     // How much of the vault this address owns
     #[returns(Decimal)]
     VaultRatio { address: Addr },
+    #[returns(Uint128)]
+    TotalActiveInDollars {},
 }
 
 #[cw_serde]

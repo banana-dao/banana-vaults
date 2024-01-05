@@ -5,7 +5,8 @@ use crate::{
     msg::{ActiveVaultAssetsResponse, ExecuteMsg, Frequency, InstantiateMsg, MigrateMsg, QueryMsg},
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
-        CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_UPDATE, VAULT_RATIO,
+        CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_UPDATE, TOTAL_ACTIVE_IN_DOLLARS,
+        VAULT_RATIO,
     },
 };
 use cosmwasm_std::{
@@ -114,6 +115,7 @@ pub fn instantiate(
 
     CAP_REACHED.save(deps.storage, &false)?;
     HALT_EXITS_AND_JOINS.save(deps.storage, &false)?;
+    TOTAL_ACTIVE_IN_DOLLARS.save(deps.storage, &Uint128::zero())?;
 
     Ok(Response::new()
         .add_attribute("action", "instantiate_banana_vault")
@@ -190,6 +192,8 @@ pub fn execute(
         ExecuteMsg::ProcessNewEntriesAndExits {} => {
             execute_process_new_entries_and_exits(deps, env, info)
         }
+        ExecuteMsg::Halt {} => execute_halt(deps, info),
+        ExecuteMsg::Resume {} => execute_resume(deps, info),
     }
 }
 
@@ -714,6 +718,9 @@ fn execute_process_new_entries_and_exits(
             }
         }
 
+        // Save it for informational purposes
+        TOTAL_ACTIVE_IN_DOLLARS.save(deps.storage, &total_dollars_in_vault)?;
+
         // All bank messages that need to be sent
         response = response.add_messages(messages)
     }
@@ -857,6 +864,18 @@ fn execute_split_route_swap_exact_amount_in(
         .add_attribute("action", "swap_split_route_swap_exact_amount_in"))
 }
 
+fn execute_halt(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
+    assert_owner(deps.storage, &info.sender)?;
+    HALT_EXITS_AND_JOINS.save(deps.storage, &true)?;
+    Ok(Response::new().add_attribute("action", "halt"))
+}
+
+fn execute_resume(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
+    assert_owner(deps.storage, &info.sender)?;
+    HALT_EXITS_AND_JOINS.save(deps.storage, &false)?;
+    Ok(Response::new().add_attribute("action", "resume"))
+}
+
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
@@ -865,6 +884,9 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::ActiveVaultAssets {} => to_json_binary(&query_active_vault_assets(deps, env)?),
         QueryMsg::PendingJoin { address } => to_json_binary(&query_pending_join(deps, address)?),
         QueryMsg::VaultRatio { address } => to_json_binary(&query_vault_ratio(deps, address)?),
+        QueryMsg::TotalActiveInDollars {} => {
+            to_json_binary(&query_total_active_in_dollars(deps)?)
+        }
     }
 }
 
@@ -911,6 +933,11 @@ fn query_pending_join(deps: Deps, address: Addr) -> StdResult<Vec<Coin>> {
 fn query_vault_ratio(deps: Deps, address: Addr) -> StdResult<Decimal> {
     let ratio = VAULT_RATIO.load(deps.storage, address)?;
     Ok(ratio)
+}
+
+fn query_total_active_in_dollars(deps: Deps) -> StdResult<Uint128> {
+    let amount = TOTAL_ACTIVE_IN_DOLLARS.load(deps.storage)?;
+    Ok(amount)
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
