@@ -31,7 +31,3 @@ serde = { version = "1.0.193", features = ["derive"] }
 thiserror = "1.0.52"
 pyth-sdk-cw = "1.2.0"
 prost = "0.12.3"
-
-[dev-dependencies]
-osmosis-test-tube = "21.0.0"
-osmosis-std = "0.21.0"

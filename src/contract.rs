@@ -17,7 +17,7 @@ use cw2::{get_contract_version, set_contract_version};
 use cw_ownable::{assert_owner, get_ownership, initialize_owner, update_ownership, Action};
 use osmosis_std_modified::types::osmosis::{
     concentratedliquidity::v1beta1::{
-        ConcentratedliquidityQuerier, MsgAddToPosition, MsgCreatePosition, Pool,
+        ConcentratedliquidityQuerier, MsgAddToPosition, MsgCreatePosition, Pool, UserPositionsResponse,
     },
     gamm::v1beta1::MsgSwapExactAmountIn,
     poolmanager::v1beta1::{
@@ -494,7 +494,7 @@ fn execute_process_new_entries_and_exits(
 
     // We will only do this is no current positions are open
     let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
-    let user_positions_response =
+    let user_positions_response: UserPositionsResponse =
         cl_querier.user_positions(env.contract.address.to_string(), config.pool_id, None)?;
 
     let mut messages = vec![];
