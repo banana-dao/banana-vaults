@@ -1,5 +1,4 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
-#[allow(unused_imports)]
 use cosmwasm_std::{Addr, Coin, Decimal, Uint128};
 use cw_ownable::{cw_ownable_execute, cw_ownable_query};
 use osmosis_std_modified::types::osmosis::poolmanager::v1beta1::{
@@ -17,7 +16,7 @@ pub struct InstantiateMsg {
     // CL Assets with their corresponding pyth price feed
     pub asset1: PythAsset,
     pub asset2: PythAsset,
-    pub dollar_cap: Option<u64>,  // with 8 decimals. Example: If vault cap is 50k USD we pass here 50000 * 10^8 = 5000000000000
+    pub dollar_cap: Option<Uint128>,  // with 8 decimals. Example: If vault cap is 50k USD we pass here 50000 * 10^8 = "5000000000000"
     // Exit vault commission (in %)
     pub exit_commission: Option<Decimal>,
     // If no address specified, contract admin will be receiver of commissions
@@ -38,6 +37,8 @@ pub enum Frequency {
 pub struct PythAsset {
     pub denom: String,
     pub identifier: PriceIdentifier,
+    // Need to know decimals to convert from pyth price to asset price
+    pub decimals: u64,
 }
 
 #[cw_ownable_execute]
@@ -89,6 +90,8 @@ pub enum ExecuteMsg {
     // Halt and Resume for Admin
     Halt {},
     Resume {},
+    // Close vault. If this is triggered the vault will be closed, nobody else can join and all funds will be withdrawn and sent to the users during next update
+    CloseVault {},
 }
 
 #[cw_ownable_query]
@@ -106,7 +109,7 @@ pub enum QueryMsg {
     // How much of the vault this address owns
     #[returns(Decimal)]
     VaultRatio { address: Addr },
-    #[returns(Uint128)]
+    #[returns(Decimal)]
     TotalActiveInDollars {},
 }
 

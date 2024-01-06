@@ -1,6 +1,6 @@
 use std::num::ParseIntError;
 
-use cosmwasm_std::{OverflowError, StdError};
+use cosmwasm_std::{OverflowError, StdError, CheckedFromRatioError};
 use cw_ownable::OwnershipError;
 use thiserror::Error;
 
@@ -18,16 +18,19 @@ pub enum ContractError {
     #[error(transparent)]
     ParseIntError(#[from] ParseIntError),
 
+    #[error(transparent)]
+    CheckedFromRatioError(#[from] CheckedFromRatioError),
+
     #[error("Pool {} not found", pool_id)]
     PoolNotFound { pool_id: u64 },
 
     #[error("Pool is not a Concentrated Liquidity Pool")]
     PoolIsNotCL {},
 
-    #[error("Two denoms must be sent to participate in the vault")]
-    NeedTwoDenoms {},
+    #[error("Funds must be sent to participate in the vault")]
+    NoFunds {},
 
-    #[error("You need to send funds that belong to this pool")]
+    #[error("You need to send funds that belong to this pool, and not repeat assets")]
     InvalidFunds {},
 
     #[error("The assets you sent in the message are not in this CL pool")]
@@ -45,15 +48,15 @@ pub enum ContractError {
     #[error("Operation unauthorized - only contract can call this function")]
     Unauthorized {},
 
-    #[error("User already in exit list - wait for exit")]
-    UserAlreadyInExitList {},
-
     #[error("Cannot swap more than available")]
     CannotSwapMoreThanAvailable {},
+
+    #[error("Vault cap reached, join not allowed until vault is under cap again")]
+    CapReached {},
 
     #[error("Vault halted, nobody can join or leave until unhalted")]
     VaultHalted {},
 
-    #[error("Vault cap reached, join not allowed until vault is under cap again")]
-    CapReached {},
+    #[error("Vault closed, nobody can join and funds returned to users")]
+    VaultClosed {},
 }

@@ -18,6 +18,7 @@ pub enum TopKey {
     HaltExitsAndJoins = b'k',
     CapReached = b'l',
     TotalActiveInDollars = b'm',
+    VaultTerminated = b'n',
 }
 
 impl TopKey {
@@ -50,14 +51,16 @@ pub const HALT_EXITS_AND_JOINS: Item<bool> = Item::new(TopKey::HaltExitsAndJoins
 // Flag to indicate if the vault cap has been reached and no more people can join (they can leave though)
 pub const CAP_REACHED: Item<bool> = Item::new(TopKey::CapReached.as_str());
 // Total amount of active assets in dollars right now
-pub const TOTAL_ACTIVE_IN_DOLLARS: Item<Uint128> = Item::new(TopKey::TotalActiveInDollars.as_str());
+pub const TOTAL_ACTIVE_IN_DOLLARS: Item<Decimal> = Item::new(TopKey::TotalActiveInDollars.as_str());
+// Flag to indicate that the vault has been terminated by owner
+pub const VAULT_TERMINATED: Item<bool> = Item::new(TopKey::VaultTerminated.as_str());
 
 #[cw_serde]
 pub struct Config {
     pub pool_id: u64,
     pub asset1: PythAsset,
     pub asset2: PythAsset,
-    pub dollar_cap: Option<u64>,
+    pub dollar_cap: Option<Uint128>,
     pub pyth_contract_address: Addr,
     pub update_frequency: Frequency,
     pub exit_commission: Option<Decimal>,

@@ -6,7 +6,7 @@ use crate::{
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
         CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_UPDATE, TOTAL_ACTIVE_IN_DOLLARS,
-        VAULT_RATIO,
+        VAULT_RATIO, VAULT_TERMINATED,
     },
 };
 use cosmwasm_std::{
@@ -17,7 +17,8 @@ use cw2::{get_contract_version, set_contract_version};
 use cw_ownable::{assert_owner, get_ownership, initialize_owner, update_ownership, Action};
 use osmosis_std_modified::types::osmosis::{
     concentratedliquidity::v1beta1::{
-        ConcentratedliquidityQuerier, MsgAddToPosition, MsgCreatePosition, Pool, UserPositionsResponse,
+        ConcentratedliquidityQuerier, MsgAddToPosition, MsgCreatePosition, Pool,
+        UserPositionsResponse,
     },
     gamm::v1beta1::MsgSwapExactAmountIn,
     poolmanager::v1beta1::{
@@ -77,6 +78,13 @@ pub fn instantiate(
         PYTH_TESTNET_CONTRACT_ADDRESS
     };
 
+    // Validate that valid addresses were sent just in case
+    if let Some(whitelisted_depositors) = msg.whitelisted_depositors.to_owned() {
+        for address in whitelisted_depositors.iter() {
+            deps.api.addr_validate(address.as_str())?;
+        }
+    };
+
     let config = Config {
         pool_id: msg.pool_id,
         asset1: msg.asset1,
@@ -116,7 +124,8 @@ pub fn instantiate(
 
     CAP_REACHED.save(deps.storage, &false)?;
     HALT_EXITS_AND_JOINS.save(deps.storage, &false)?;
-    TOTAL_ACTIVE_IN_DOLLARS.save(deps.storage, &Uint128::zero())?;
+    TOTAL_ACTIVE_IN_DOLLARS.save(deps.storage, &Decimal::zero())?;
+    VAULT_TERMINATED.save(deps.storage, &false)?;
 
     Ok(Response::new()
         .add_attribute("action", "instantiate_banana_vault")
@@ -195,6 +204,7 @@ pub fn execute(
         }
         ExecuteMsg::Halt {} => execute_halt(deps, info),
         ExecuteMsg::Resume {} => execute_resume(deps, info),
+        ExecuteMsg::CloseVault {} => execute_close_vault(deps, info),
     }
 }
 
@@ -228,6 +238,13 @@ fn execute_modify_config(
         return Err(ContractError::CannotChangePoolId {});
     }
 
+    // Validate that valid addresses were sent just in case
+    if let Some(whitelisted_depositors) = new_config.whitelisted_depositors.to_owned() {
+        for address in whitelisted_depositors.iter() {
+            deps.api.addr_validate(address.as_str())?;
+        }
+    };
+
     CONFIG.save(deps.storage, &new_config)?;
 
     // If we modify config we are going to reset the timer for update (so we allow changing from blocks to seconds and viceversa)
@@ -249,6 +266,11 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
     let config = CONFIG.load(deps.storage)?;
     verify_funds(&info, &config)?;
 
+    // Check if vault is closed
+    if VAULT_TERMINATED.load(deps.storage)? {
+        return Err(ContractError::VaultClosed {});
+    }
+
     // Check if vault is halted or cap has been reached
     if HALT_EXITS_AND_JOINS.load(deps.storage)? {
         return Err(ContractError::VaultHalted {});
@@ -256,31 +278,61 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
 
     // Check if vault cap has been reached
     if CAP_REACHED.load(deps.storage)? {
-
         // Check if user is whitelisted to exceed cap
-        if !config.whitelisted_depositors.unwrap().contains(&info.sender) {
+        if !config
+            .whitelisted_depositors
+            .unwrap_or_default()
+            .contains(&info.sender)
+        {
             return Err(ContractError::CapReached {});
-        }    
+        }
     }
 
     // We queue up the assets for the next iteration
     let mut assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
-    assets_pending[0].amount += info.funds[0].amount;
-    assets_pending[1].amount += info.funds[1].amount;
+
+    for asset in info.funds.iter() {
+        if asset.denom == config.asset1.denom {
+            assets_pending[0].amount += asset.amount;
+        } else if asset.denom == config.asset2.denom {
+            assets_pending[1].amount += asset.amount;
+        } else {
+            return Err(ContractError::InvalidFunds {});
+        }
+    }
+
     ASSETS_PENDING_ACTIVATION.save(deps.storage, &assets_pending)?;
 
     // Check if user added to the current pending amount or if it's the first time he added
+
     match ACCOUNTS_PENDING_ACTIVATION.may_load(deps.storage, info.sender.to_owned())? {
         Some(mut funds) => {
-            funds[0].amount += info.funds[0].amount;
-            funds[1].amount += info.funds[1].amount;
+            for fund in info.funds.iter() {
+                if fund.denom == config.asset1.denom {
+                    funds[0].amount += fund.amount;
+                } else if fund.denom == config.asset2.denom {
+                    funds[1].amount += fund.amount;
+                }
+            }
             ACCOUNTS_PENDING_ACTIVATION.save(deps.storage, info.sender.to_owned(), &funds)?;
         }
         None => {
+            let mut amounts_to_add = vec![
+                coin(0, config.asset1.denom.to_owned()),
+                coin(0, config.asset2.denom.to_owned()),
+            ];
+
+            for fund in info.funds.iter() {
+                if fund.denom == config.asset1.denom {
+                    amounts_to_add[0].amount += fund.amount;
+                } else if fund.denom == config.asset2.denom {
+                    amounts_to_add[1].amount += fund.amount;
+                }
+            }
             ACCOUNTS_PENDING_ACTIVATION.save(
                 deps.storage,
                 info.sender.to_owned(),
-                &vec![info.funds[0].clone(), info.funds[1].clone()],
+                &amounts_to_add,
             )?;
         }
     }
@@ -301,7 +353,7 @@ fn execute_leave(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractE
         return Err(ContractError::VaultHalted {});
     }
 
-    if let Some(funds) =
+    if let Some(mut funds) =
         ACCOUNTS_PENDING_ACTIVATION.may_load(deps.storage, info.sender.to_owned())?
     {
         // We return the pending joining assets
@@ -311,6 +363,10 @@ fn execute_leave(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractE
         ASSETS_PENDING_ACTIVATION.save(deps.storage, &assets_pending)?;
 
         ACCOUNTS_PENDING_ACTIVATION.remove(deps.storage, info.sender.to_owned());
+
+        // Remove empty amounts to avoid sending empty funds in bank msg
+        funds.retain(|f| f.amount.ne(&Uint128::zero()));
+
         let send_msg = BankMsg::Send {
             to_address: info.sender.to_string(),
             amount: funds,
@@ -322,11 +378,10 @@ fn execute_leave(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractE
     if VAULT_RATIO.has(deps.storage, info.sender.to_owned()) {
         // We add the user to the list of addresses waiting to leave the vault
         let mut addresses_waiting_for_exit = ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)?;
-        if addresses_waiting_for_exit.contains(&info.sender) {
-            return Err(ContractError::UserAlreadyInExitList {});
+        if !addresses_waiting_for_exit.contains(&info.sender) {
+            addresses_waiting_for_exit.push(info.sender.to_owned());
+            ADDRESSES_WAITING_FOR_EXIT.save(deps.storage, &addresses_waiting_for_exit)?;
         }
-        addresses_waiting_for_exit.push(info.sender.to_owned());
-        ADDRESSES_WAITING_FOR_EXIT.save(deps.storage, &addresses_waiting_for_exit)?;
     }
 
     Ok(response
@@ -616,7 +671,10 @@ fn execute_process_new_entries_and_exits(
             config.asset1.identifier,
         )?;
         let price_feed_asset1 = price_feed_response_asset1.price_feed;
-        let current_price_asset1 = price_feed_asset1.get_price_unchecked().price;
+        let current_price_asset1 = Decimal::from_ratio(
+            Uint128::new(price_feed_asset1.get_price_unchecked().price as u128),
+            config.asset1.decimals,
+        );
 
         let price_feed_response_asset2: PriceFeedResponse = query_price_feed(
             &deps.querier,
@@ -624,16 +682,18 @@ fn execute_process_new_entries_and_exits(
             config.asset2.identifier,
         )?;
         let price_feed_asset2 = price_feed_response_asset2.price_feed;
-        let current_price_asset2 = price_feed_asset2.get_price_unchecked().price;
+        let current_price_asset2 = Decimal::from_ratio(
+            Uint128::new(price_feed_asset2.get_price_unchecked().price as u128),
+            config.asset2.decimals,
+        );
 
         // Now that we have current prices of both assets we are going to see how much each address owns in dollars and store it to recalculate vault ratios
-        let mut total_dollars_in_vault = Uint128::zero();
-        let mut address_dollars_map: HashMap<Addr, Uint128> = HashMap::new();
+        let mut total_dollars_in_vault = Decimal::zero();
+        let mut address_dollars_map: HashMap<Addr, Decimal> = HashMap::new();
 
         let ratios: Vec<(Addr, Decimal)> = VAULT_RATIO
             .range(deps.storage, None, None, Order::Ascending)
             .filter_map(|v| v.ok())
-            .map(|(a, v)| (a, v))
             .collect();
 
         for ratio in ratios.iter() {
@@ -650,10 +710,8 @@ fn execute_process_new_entries_and_exits(
                 ACCOUNTS_PENDING_ACTIVATION.remove(deps.storage, ratio.0.to_owned())
             }
 
-            let dollars_asset1 =
-                amount_assets1.checked_mul(Uint128::new(current_price_asset1 as u128))?;
-            let dollars_asset2 =
-                amount_assets2.checked_mul(Uint128::new(current_price_asset2 as u128))?;
+            let dollars_asset1 = current_price_asset1.checked_mul(Decimal::new(amount_assets1))?;
+            let dollars_asset2 = current_price_asset2.checked_mul(Decimal::new(amount_assets2))?;
 
             let total_amount_dollars_for_address = dollars_asset1.checked_add(dollars_asset2)?;
 
@@ -667,16 +725,13 @@ fn execute_process_new_entries_and_exits(
         let new_entries: Vec<(Addr, Vec<Coin>)> = ACCOUNTS_PENDING_ACTIVATION
             .range(deps.storage, None, None, Order::Ascending)
             .filter_map(|v| v.ok())
-            .map(|(a, v)| (a, v))
             .collect();
 
         for new_entry in new_entries.iter() {
-            let dollars_asset1 = new_entry.1[0]
-                .amount
-                .checked_mul(Uint128::new(current_price_asset1 as u128))?;
-            let dollars_asset2 = new_entry.1[1]
-                .amount
-                .checked_mul(Uint128::new(current_price_asset2 as u128))?;
+            let dollars_asset1 =
+                current_price_asset1.checked_mul(Decimal::new(new_entry.1[0].amount))?;
+            let dollars_asset2 =
+                current_price_asset2.checked_mul(Decimal::new(new_entry.1[1].amount))?;
 
             let total_amount_dollars_for_address = dollars_asset1.checked_add(dollars_asset2)?;
 
@@ -693,7 +748,7 @@ fn execute_process_new_entries_and_exits(
 
         // Recalculate ratios
         for each_address in address_dollars_map.iter() {
-            let ratio = Decimal::from_ratio(each_address.1.to_owned(), total_dollars_in_vault);
+            let ratio = each_address.1.checked_div(total_dollars_in_vault)?;
             VAULT_RATIO.save(deps.storage, each_address.0.to_owned(), &ratio)?;
         }
 
@@ -716,7 +771,7 @@ fn execute_process_new_entries_and_exits(
 
         // Check that we are not over the vault cap, if that's the case, we will flag it to halt joins until under cap again
         if let Some(dollar_cap) = config.dollar_cap {
-            if total_dollars_in_vault >= Uint128::new(dollar_cap as u128) {
+            if total_dollars_in_vault >= Decimal::new(dollar_cap) {
                 CAP_REACHED.save(deps.storage, &true)?;
             } else {
                 CAP_REACHED.save(deps.storage, &false)?;
@@ -881,6 +936,65 @@ fn execute_resume(deps: DepsMut, info: MessageInfo) -> Result<Response, Contract
     Ok(Response::new().add_attribute("action", "resume"))
 }
 
+fn execute_close_vault(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
+    assert_owner(deps.storage, &info.sender)?;
+    let config = CONFIG.load(deps.storage)?;
+
+    let mut messages = vec![];
+
+    // We get all addresses that are waiting to join and send the funds back
+
+    let addresses_pending_activation: Vec<(Addr, Vec<Coin>)> = ACCOUNTS_PENDING_ACTIVATION
+        .range(deps.storage, None, None, Order::Ascending)
+        .filter_map(|v| v.ok())
+        .collect();
+
+    for each_address in addresses_pending_activation.iter() {
+        let mut funds = each_address.1.to_owned();
+
+        // Remove empty amounts to avoid sending empty funds in bank msg
+        funds.retain(|f| f.amount.ne(&Uint128::zero()));
+
+        let send_msg = BankMsg::Send {
+            to_address: each_address.0.to_string(),
+            amount: funds,
+        };
+
+        messages.push(send_msg);
+    }
+
+    // We get all addresses that are waiting to exit and add all the ones that are in the vault and are not waiting for exit
+    let mut addresses_waiting_for_exit = ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)?;
+    let ratios: Vec<(Addr, Decimal)> = VAULT_RATIO
+            .range(deps.storage, None, None, Order::Ascending)
+            .filter_map(|v| v.ok())
+            .collect();
+
+    for ratio in ratios.iter() {
+        if !addresses_waiting_for_exit.contains(&ratio.0) {
+            addresses_waiting_for_exit.push(ratio.0.to_owned());
+        }
+    }
+
+    // Save all in state
+    // No one else is waiting to join (we sent all funds back)
+    // No funds are waiting to join
+    // Everyone is added to exit list
+    // Vault is terminated (no one can join anymore)
+
+    ACCOUNTS_PENDING_ACTIVATION.clear(deps.storage);
+    ASSETS_PENDING_ACTIVATION.save(
+        deps.storage,
+        &vec![coin(0, config.asset1.denom), coin(0, config.asset2.denom)],
+    )?;
+    ADDRESSES_WAITING_FOR_EXIT.save(deps.storage, &addresses_waiting_for_exit)?;
+    VAULT_TERMINATED.save(deps.storage, &true)?;
+
+    Ok(Response::new()
+        .add_messages(messages)
+        .add_attribute("action", "vault_terminated"))
+}
+
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
@@ -889,9 +1003,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::ActiveVaultAssets {} => to_json_binary(&query_active_vault_assets(deps, env)?),
         QueryMsg::PendingJoin { address } => to_json_binary(&query_pending_join(deps, address)?),
         QueryMsg::VaultRatio { address } => to_json_binary(&query_vault_ratio(deps, address)?),
-        QueryMsg::TotalActiveInDollars {} => {
-            to_json_binary(&query_total_active_in_dollars(deps)?)
-        }
+        QueryMsg::TotalActiveInDollars {} => to_json_binary(&query_total_active_in_dollars(deps)?),
     }
 }
 
@@ -940,7 +1052,7 @@ fn query_vault_ratio(deps: Deps, address: Addr) -> StdResult<Decimal> {
     Ok(ratio)
 }
 
-fn query_total_active_in_dollars(deps: Deps) -> StdResult<Uint128> {
+fn query_total_active_in_dollars(deps: Deps) -> StdResult<Decimal> {
     let amount = TOTAL_ACTIVE_IN_DOLLARS.load(deps.storage)?;
     Ok(amount)
 }
@@ -969,12 +1081,22 @@ fn verify_config(config: &Config, pool: Pool) -> Result<(), ContractError> {
 }
 
 fn verify_funds(info: &MessageInfo, config: &Config) -> Result<(), ContractError> {
-    if info.funds.len() != 2 || info.funds[0].denom == info.funds[1].denom {
-        return Err(ContractError::NeedTwoDenoms {});
+    if info.funds.is_empty() {
+        return Err(ContractError::NoFunds {});
     }
 
-    if info.funds[0].denom != config.asset1.denom && info.funds[1].denom != config.asset2.denom {
+    if info.funds.len() == 2 && info.funds[0].denom == info.funds[1].denom {
         return Err(ContractError::InvalidFunds {});
+    }
+
+    if info.funds.len() > 2 {
+        return Err(ContractError::InvalidFunds {});
+    }
+
+    for fund in info.funds.iter() {
+        if fund.denom != config.asset1.denom && fund.denom != config.asset2.denom {
+            return Err(ContractError::InvalidFunds {});
+        }
     }
 
     Ok(())
