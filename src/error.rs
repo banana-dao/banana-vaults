@@ -54,6 +54,6 @@ pub enum ContractError {
     #[error("Vault halted, nobody can join or leave until unhalted")]
     VaultHalted {},
 
-    #[error("Vault cap reached, nobody can join until vault is under cap again")]
+    #[error("Vault cap reached, join not allowed until vault is under cap again")]
     CapReached {},
 }

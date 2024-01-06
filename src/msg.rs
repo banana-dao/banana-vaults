@@ -22,6 +22,8 @@ pub struct InstantiateMsg {
     pub exit_commission: Option<Decimal>,
     // If no address specified, contract admin will be receiver of commissions
     pub commission_receiver: Option<Addr>,
+    // Addresses allowed to exceed the deposit cap
+    pub whitelisted_depositors: Option<Vec<Addr>>,
     // Flag to take the right pyth contract address - true for mainnet, false for testnet
     pub mainnet: bool,
 }

@@ -86,6 +86,7 @@ pub fn instantiate(
         update_frequency: msg.update_frequency.to_owned(),
         exit_commission: msg.exit_commission,
         commission_receiver: msg.commission_receiver.unwrap_or(info.sender.to_owned()),
+        whitelisted_depositors: msg.whitelisted_depositors,
     };
 
     // Check that the assets in the pool are the same assets we sent in the instantiate message
@@ -255,7 +256,11 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
 
     // Check if vault cap has been reached
     if CAP_REACHED.load(deps.storage)? {
-        return Err(ContractError::CapReached {});
+
+        // Check if user is whitelisted to exceed cap
+        if !config.whitelisted_depositors.unwrap().contains(&info.sender) {
+            return Err(ContractError::CapReached {});
+        }    
     }
 
     // We queue up the assets for the next iteration

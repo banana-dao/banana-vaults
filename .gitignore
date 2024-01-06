@@ -2,6 +2,7 @@
 /artifacts
 /target
 /schema
+*.wasm
 
 # IDEs
 .vscode/

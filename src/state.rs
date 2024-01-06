@@ -62,4 +62,5 @@ pub struct Config {
     pub update_frequency: Frequency,
     pub exit_commission: Option<Decimal>,
     pub commission_receiver: Addr,
+    pub whitelisted_depositors: Option<Vec<Addr>>,
 }
