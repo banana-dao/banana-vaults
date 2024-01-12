@@ -5,7 +5,7 @@ use crate::{
     msg::{ActiveVaultAssetsResponse, ExecuteMsg, Frequency, InstantiateMsg, MigrateMsg, QueryMsg},
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
-        CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_UPDATE, TOTAL_ACTIVE_IN_DOLLARS,
+        CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_EXIT, LAST_UPDATE, TOTAL_ACTIVE_IN_DOLLARS,
         VAULT_RATIO, VAULT_TERMINATED,
     },
 };
@@ -40,6 +40,10 @@ const PYTH_TESTNET_CONTRACT_ADDRESS: &str =
     "osmo1hpdzqku55lmfmptpyj6wdlugqs5etr6teqf7r4yqjjrxjznjhtuqqu5kdh";
 const PYTH_MAINNET_CONTRACT_ADDRESS: &str =
     "osmo13ge29x4e2s63a8ytz2px8gurtyznmue4a69n5275692v3qn3ks8q7cwck7";
+
+// Used for the dead man switch. If admin didn't allow withdrawals for this amount of time, anyone can trigger the switch and all positions will be closed
+// And people trying to leave will be able to leave
+const MAX_NO_EXIT_PERIOD: u64 = 86400 * 14; // 14 days
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -126,6 +130,7 @@ pub fn instantiate(
     HALT_EXITS_AND_JOINS.save(deps.storage, &false)?;
     TOTAL_ACTIVE_IN_DOLLARS.save(deps.storage, &Decimal::zero())?;
     VAULT_TERMINATED.save(deps.storage, &false)?;
+    LAST_EXIT.save(deps.storage, &env.block.time.seconds())?;
 
     Ok(Response::new()
         .add_attribute("action", "instantiate_banana_vault")
@@ -205,6 +210,7 @@ pub fn execute(
         ExecuteMsg::Halt {} => execute_halt(deps, info),
         ExecuteMsg::Resume {} => execute_resume(deps, info),
         ExecuteMsg::CloseVault {} => execute_close_vault(deps, info),
+        ExecuteMsg::ForceExits {} => execute_force_exits(deps, env),
     }
 }
 
@@ -769,6 +775,8 @@ fn execute_process_new_entries_and_exits(
             }
         }
 
+        LAST_EXIT.save(deps.storage, &env.block.time.seconds())?;
+
         // Check that we are not over the vault cap, if that's the case, we will flag it to halt joins until under cap again
         if let Some(dollar_cap) = config.dollar_cap {
             if total_dollars_in_vault >= Decimal::new(dollar_cap) {
@@ -966,9 +974,9 @@ fn execute_close_vault(deps: DepsMut, info: MessageInfo) -> Result<Response, Con
     // We get all addresses that are waiting to exit and add all the ones that are in the vault and are not waiting for exit
     let mut addresses_waiting_for_exit = ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)?;
     let ratios: Vec<(Addr, Decimal)> = VAULT_RATIO
-            .range(deps.storage, None, None, Order::Ascending)
-            .filter_map(|v| v.ok())
-            .collect();
+        .range(deps.storage, None, None, Order::Ascending)
+        .filter_map(|v| v.ok())
+        .collect();
 
     for ratio in ratios.iter() {
         if !addresses_waiting_for_exit.contains(&ratio.0) {
@@ -993,6 +1001,45 @@ fn execute_close_vault(deps: DepsMut, info: MessageInfo) -> Result<Response, Con
     Ok(Response::new()
         .add_messages(messages)
         .add_attribute("action", "vault_terminated"))
+}
+
+fn execute_force_exits(deps: DepsMut, env: Env) -> Result<Response, ContractError> {
+    let last_exit = LAST_EXIT.load(deps.storage)?;
+
+    if last_exit.checked_add(MAX_NO_EXIT_PERIOD).unwrap() < env.block.time.seconds() {
+        return Err(ContractError::CantForceExitsYet {
+            seconds: env.block.time.seconds() - last_exit.checked_add(MAX_NO_EXIT_PERIOD).unwrap(),
+        });
+    }
+
+    let mut messages = vec![];
+    let config = CONFIG.load(deps.storage)?;
+    let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
+    let user_positions_response: UserPositionsResponse =
+        cl_querier.user_positions(env.contract.address.to_string(), config.pool_id, None)?;
+
+    for position in user_positions_response.positions.iter() {
+        let msg_withdraw_position: CosmosMsg = MsgWithdrawPosition {
+            position_id: position.position.as_ref().unwrap().position_id,
+            sender: env.contract.address.to_string(),
+            liquidity_amount: position.position.as_ref().unwrap().liquidity.to_owned(),
+        }
+        .into();
+
+        messages.push(msg_withdraw_position);
+    }
+
+    let update_users_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+        contract_addr: env.contract.address.to_string(),
+        msg: to_json_binary(&ExecuteMsg::ProcessNewEntriesAndExits {})?,
+        funds: vec![],
+    });
+
+    messages.push(update_users_msg);
+
+    Ok(Response::new()
+        .add_messages(messages)
+        .add_attribute("action", "force_exits"))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]

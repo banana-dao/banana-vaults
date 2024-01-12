@@ -19,6 +19,7 @@ pub enum TopKey {
     CapReached = b'l',
     TotalActiveInDollars = b'm',
     VaultTerminated = b'n',
+    LastExit = b'o',
 }
 
 impl TopKey {
@@ -35,8 +36,10 @@ impl TopKey {
 pub const CONFIG: Item<Config> = Item::new(TopKey::Config.as_str());
 // Vault ratio that each address owns
 pub const VAULT_RATIO: Map<Addr, Decimal> = Map::new(TopKey::VaultRatio.as_str());
-// Last time the vault was updated
+// Last time the vault was updated (block height / time)
 pub const LAST_UPDATE: Item<u64> = Item::new(TopKey::LastUpdate.as_str());
+// Last time exits were allowed (block time)
+pub const LAST_EXIT: Item<u64> = Item::new(TopKey::LastExit.as_str());
 // Assets waiting to join the vault
 pub const ASSETS_PENDING_ACTIVATION: Item<Vec<Coin>> =
     Item::new(TopKey::AssetPendingActivation.as_str());

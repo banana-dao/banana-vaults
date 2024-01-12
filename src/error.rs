@@ -1,6 +1,6 @@
 use std::num::ParseIntError;
 
-use cosmwasm_std::{OverflowError, StdError, CheckedFromRatioError};
+use cosmwasm_std::{CheckedFromRatioError, OverflowError, StdError};
 use cw_ownable::OwnershipError;
 use thiserror::Error;
 
@@ -59,4 +59,7 @@ pub enum ContractError {
 
     #[error("Vault closed, nobody can join and funds returned to users")]
     VaultClosed {},
+
+    #[error("Cant force exits yet. Still {} seconds remaining", seconds)]
+    CantForceExitsYet { seconds: u64 },
 }
