@@ -1060,8 +1060,13 @@ fn query_config(deps: Deps) -> StdResult<Config> {
 }
 
 fn query_active_vault_assets(deps: Deps, env: Env) -> StdResult<ActiveVaultAssetsResponse> {
-    let assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
     let config = CONFIG.load(deps.storage)?;
+    let assets_pending = ASSETS_PENDING_ACTIVATION
+        .may_load(deps.storage)?
+        .unwrap_or(vec![
+            coin(0, CONFIG.load(deps.storage)?.asset1.denom),
+            coin(0, CONFIG.load(deps.storage)?.asset2.denom),
+        ]);
 
     let balance_asset1 = deps.querier.query_balance(
         env.contract.address.to_owned(),
@@ -1090,12 +1095,16 @@ fn query_active_vault_assets(deps: Deps, env: Env) -> StdResult<ActiveVaultAsset
 }
 
 fn query_pending_join(deps: Deps, address: Addr) -> StdResult<Vec<Coin>> {
-    let assets = ACCOUNTS_PENDING_ACTIVATION.load(deps.storage, address)?;
+    let assets = ACCOUNTS_PENDING_ACTIVATION
+        .may_load(deps.storage, address)?
+        .unwrap_or_default();
     Ok(assets)
 }
 
 fn query_vault_ratio(deps: Deps, address: Addr) -> StdResult<Decimal> {
-    let ratio = VAULT_RATIO.load(deps.storage, address)?;
+    let ratio = VAULT_RATIO
+        .may_load(deps.storage, address)?
+        .unwrap_or_default();
     Ok(ratio)
 }
 
