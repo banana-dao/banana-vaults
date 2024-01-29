@@ -91,8 +91,8 @@ pub fn instantiate(
 
     let config = Config {
         pool_id: msg.pool_id,
+        asset0: msg.asset0,
         asset1: msg.asset1,
-        asset2: msg.asset2,
         dollar_cap: msg.dollar_cap,
         pyth_contract_address: Addr::unchecked(pyth_contract_address),
         update_frequency: msg.update_frequency.to_owned(),
@@ -110,7 +110,7 @@ pub fn instantiate(
     CONFIG.save(deps.storage, &config)?;
     ASSETS_PENDING_ACTIVATION.save(
         deps.storage,
-        &vec![coin(0, config.asset1.denom), coin(0, config.asset2.denom)],
+        &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
     )?;
     ADDRESSES_WAITING_FOR_EXIT.save(deps.storage, &vec![])?;
 
@@ -236,7 +236,7 @@ fn execute_modify_config(
 
     let old_config = CONFIG.load(deps.storage)?;
 
-    if new_config.asset1 != old_config.asset1 || new_config.asset2 != old_config.asset2 {
+    if new_config.asset0 != old_config.asset0 || new_config.asset1 != old_config.asset1 {
         return Err(ContractError::CannotChangeAssets {});
     }
 
@@ -298,9 +298,9 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
     let mut assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
 
     for asset in info.funds.iter() {
-        if asset.denom == config.asset1.denom {
+        if asset.denom == config.asset0.denom {
             assets_pending[0].amount += asset.amount;
-        } else if asset.denom == config.asset2.denom {
+        } else if asset.denom == config.asset1.denom {
             assets_pending[1].amount += asset.amount;
         } else {
             return Err(ContractError::InvalidFunds {});
@@ -314,9 +314,9 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
     match ACCOUNTS_PENDING_ACTIVATION.may_load(deps.storage, info.sender.to_owned())? {
         Some(mut funds) => {
             for fund in info.funds.iter() {
-                if fund.denom == config.asset1.denom {
+                if fund.denom == config.asset0.denom {
                     funds[0].amount += fund.amount;
-                } else if fund.denom == config.asset2.denom {
+                } else if fund.denom == config.asset1.denom {
                     funds[1].amount += fund.amount;
                 }
             }
@@ -324,14 +324,14 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
         }
         None => {
             let mut amounts_to_add = vec![
+                coin(0, config.asset0.denom.to_owned()),
                 coin(0, config.asset1.denom.to_owned()),
-                coin(0, config.asset2.denom.to_owned()),
             ];
 
             for fund in info.funds.iter() {
-                if fund.denom == config.asset1.denom {
+                if fund.denom == config.asset0.denom {
                     amounts_to_add[0].amount += fund.amount;
-                } else if fund.denom == config.asset2.denom {
+                } else if fund.denom == config.asset1.denom {
                     amounts_to_add[1].amount += fund.amount;
                 }
             }
@@ -409,20 +409,20 @@ fn execute_create_position(
     assert_owner(deps.storage, &info.sender)?;
     let config = CONFIG.load(deps.storage)?;
 
+    let balance_asset0 = deps.querier.query_balance(
+        env.contract.address.to_owned(),
+        config.asset0.denom.to_owned(),
+    )?;
     let balance_asset1 = deps.querier.query_balance(
         env.contract.address.to_owned(),
         config.asset1.denom.to_owned(),
-    )?;
-    let balance_asset2 = deps.querier.query_balance(
-        env.contract.address.to_owned(),
-        config.asset2.denom.to_owned(),
     )?;
 
     verify_availability_of_funds(
         deps.storage,
         tokens_provided.clone(),
+        balance_asset0,
         balance_asset1,
-        balance_asset2,
     )?;
 
     let msg_add_position: CosmosMsg = MsgCreatePosition {
@@ -461,25 +461,25 @@ fn execute_add_to_position(
     assert_owner(deps.storage, &info.sender)?;
     let config = CONFIG.load(deps.storage)?;
 
+    let balance_asset0 = deps.querier.query_balance(
+        env.contract.address.to_owned(),
+        config.asset0.denom.to_owned(),
+    )?;
     let balance_asset1 = deps.querier.query_balance(
         env.contract.address.to_owned(),
         config.asset1.denom.to_owned(),
     )?;
-    let balance_asset2 = deps.querier.query_balance(
-        env.contract.address.to_owned(),
-        config.asset2.denom.to_owned(),
-    )?;
 
     let tokens_provided = vec![
-        coin(amount0.parse::<u128>()?, config.asset1.denom.to_owned()),
-        coin(amount1.parse::<u128>()?, config.asset2.denom.to_owned()),
+        coin(amount0.parse::<u128>()?, config.asset0.denom.to_owned()),
+        coin(amount1.parse::<u128>()?, config.asset1.denom.to_owned()),
     ];
 
     verify_availability_of_funds(
         deps.storage,
         tokens_provided.clone(),
+        balance_asset0,
         balance_asset1,
-        balance_asset2,
     )?;
 
     let msg_add_to_position: CosmosMsg = MsgAddToPosition {
@@ -567,69 +567,69 @@ fn execute_process_new_entries_and_exits(
     let mut response = Response::new();
     if user_positions_response.positions.is_empty() {
         // These are all the assets the vault has that are not pending to join
-        let balance_asset1 = deps.querier.query_balance(
+        let balance_asset0 = deps.querier.query_balance(
             env.contract.address.to_owned(),
-            config.asset1.denom.to_owned(),
+            config.asset0.denom.to_owned(),
         )?;
-        let balance_asset2 = deps
+        let balance_asset1 = deps
             .querier
-            .query_balance(env.contract.address, config.asset2.denom.to_owned())?;
+            .query_balance(env.contract.address, config.asset1.denom.to_owned())?;
 
         let assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
+
+        let available_in_vault_asset0 = coin(
+            balance_asset0
+                .amount
+                .checked_sub(assets_pending[0].amount)?
+                .u128(),
+            config.asset0.denom.to_owned(),
+        );
 
         let available_in_vault_asset1 = coin(
             balance_asset1
                 .amount
-                .checked_sub(assets_pending[0].amount)?
+                .checked_sub(assets_pending[1].amount)?
                 .u128(),
             config.asset1.denom.to_owned(),
         );
 
-        let available_in_vault_asset2 = coin(
-            balance_asset2
-                .amount
-                .checked_sub(assets_pending[1].amount)?
-                .u128(),
-            config.asset2.denom.to_owned(),
-        );
-
         let addresses_waiting_for_exit = ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)?;
 
+        let mut total_commission_asset0 = Uint128::zero();
         let mut total_commission_asset1 = Uint128::zero();
-        let mut total_commission_asset2 = Uint128::zero();
         // We are going to process all exits first
         for exit_address in addresses_waiting_for_exit.iter() {
             let ratio = VAULT_RATIO.load(deps.storage, exit_address.to_owned())?;
+            let mut amount_to_send_asset0 = available_in_vault_asset0.amount.mul_floor(ratio);
             let mut amount_to_send_asset1 = available_in_vault_asset1.amount.mul_floor(ratio);
-            let mut amount_to_send_asset2 = available_in_vault_asset2.amount.mul_floor(ratio);
             // If there is a vault exit commission, we will take it from the amount to send
             if let Some(exit_commission) = config.exit_commission {
+                let amount_commission_asset0 = amount_to_send_asset0.mul_floor(exit_commission);
                 let amount_commission_asset1 = amount_to_send_asset1.mul_floor(exit_commission);
-                let amount_commission_asset2 = amount_to_send_asset2.mul_floor(exit_commission);
 
+                amount_to_send_asset0 =
+                    amount_to_send_asset0.checked_sub(amount_commission_asset0)?;
                 amount_to_send_asset1 =
                     amount_to_send_asset1.checked_sub(amount_commission_asset1)?;
-                amount_to_send_asset2 =
-                    amount_to_send_asset2.checked_sub(amount_commission_asset2)?;
 
+                total_commission_asset0 =
+                    total_commission_asset0.checked_add(amount_commission_asset0)?;
                 total_commission_asset1 =
                     total_commission_asset1.checked_add(amount_commission_asset1)?;
-                total_commission_asset2 =
-                    total_commission_asset2.checked_add(amount_commission_asset2)?;
             }
 
             let mut amounts_send_msg = vec![];
+            if amount_to_send_asset0.gt(&Uint128::zero()) {
+                amounts_send_msg.push(coin(
+                    amount_to_send_asset0.u128(),
+                    config.asset0.denom.to_owned(),
+                ));
+            }
+
             if amount_to_send_asset1.gt(&Uint128::zero()) {
                 amounts_send_msg.push(coin(
                     amount_to_send_asset1.u128(),
                     config.asset1.denom.to_owned(),
-                ));
-            }
-
-            if amount_to_send_asset2.gt(&Uint128::zero()) {
-                amounts_send_msg.push(coin(
-                    amount_to_send_asset2.u128(),
-                    config.asset2.denom.to_owned(),
                 ));
             }
 
@@ -646,16 +646,16 @@ fn execute_process_new_entries_and_exits(
         // Add the commission message for vault owner
         let owner = config.commission_receiver;
         let mut coins_for_owner = vec![];
+        if total_commission_asset0.gt(&Uint128::zero()) {
+            coins_for_owner.push(coin(
+                total_commission_asset0.u128(),
+                config.asset0.denom.to_owned(),
+            ));
+        }
         if total_commission_asset1.gt(&Uint128::zero()) {
             coins_for_owner.push(coin(
                 total_commission_asset1.u128(),
                 config.asset1.denom.to_owned(),
-            ));
-        }
-        if total_commission_asset2.gt(&Uint128::zero()) {
-            coins_for_owner.push(coin(
-                total_commission_asset2.u128(),
-                config.asset2.denom.to_owned(),
             ));
         }
 
@@ -671,26 +671,26 @@ fn execute_process_new_entries_and_exits(
         ADDRESSES_WAITING_FOR_EXIT.save(deps.storage, &vec![])?;
         // After processing all exits, we are going to see how much the previous vault participants and new participants own (in dollars) to recalculate vault ratios
         // Get prices in dollars for each asset
-        let price_feed_response_asset1: PriceFeedResponse = query_price_feed(
+        let price_feed_response_asset0: PriceFeedResponse = query_price_feed(
             &deps.querier,
             config.pyth_contract_address.to_owned(),
+            config.asset0.identifier,
+        )?;
+        let price_feed_asset0 = price_feed_response_asset0.price_feed;
+        let current_price_asset0 = Decimal::from_ratio(
+            Uint128::new(price_feed_asset0.get_price_unchecked().price as u128),
+            config.asset0.decimals,
+        );
+
+        let price_feed_response_asset1: PriceFeedResponse = query_price_feed(
+            &deps.querier,
+            config.pyth_contract_address,
             config.asset1.identifier,
         )?;
         let price_feed_asset1 = price_feed_response_asset1.price_feed;
         let current_price_asset1 = Decimal::from_ratio(
             Uint128::new(price_feed_asset1.get_price_unchecked().price as u128),
             config.asset1.decimals,
-        );
-
-        let price_feed_response_asset2: PriceFeedResponse = query_price_feed(
-            &deps.querier,
-            config.pyth_contract_address,
-            config.asset2.identifier,
-        )?;
-        let price_feed_asset2 = price_feed_response_asset2.price_feed;
-        let current_price_asset2 = Decimal::from_ratio(
-            Uint128::new(price_feed_asset2.get_price_unchecked().price as u128),
-            config.asset2.decimals,
         );
 
         // Now that we have current prices of both assets we are going to see how much each address owns in dollars and store it to recalculate vault ratios
@@ -703,8 +703,8 @@ fn execute_process_new_entries_and_exits(
             .collect();
 
         for ratio in ratios.iter() {
-            let mut amount_assets1 = available_in_vault_asset1.amount.mul_floor(ratio.1);
-            let mut amount_assets2 = available_in_vault_asset2.amount.mul_floor(ratio.1);
+            let mut amount_assets1 = available_in_vault_asset0.amount.mul_floor(ratio.1);
+            let mut amount_assets2 = available_in_vault_asset1.amount.mul_floor(ratio.1);
 
             // If for some reason this address is actually waiting to join with more assets, we will add this here too
             if let Some(funds) =
@@ -716,10 +716,10 @@ fn execute_process_new_entries_and_exits(
                 ACCOUNTS_PENDING_ACTIVATION.remove(deps.storage, ratio.0.to_owned())
             }
 
-            let dollars_asset1 = current_price_asset1.checked_mul(Decimal::new(amount_assets1))?;
-            let dollars_asset2 = current_price_asset2.checked_mul(Decimal::new(amount_assets2))?;
+            let dollars_asset0 = current_price_asset0.checked_mul(Decimal::new(amount_assets1))?;
+            let dollars_asset1 = current_price_asset1.checked_mul(Decimal::new(amount_assets2))?;
 
-            let total_amount_dollars_for_address = dollars_asset1.checked_add(dollars_asset2)?;
+            let total_amount_dollars_for_address = dollars_asset0.checked_add(dollars_asset1)?;
 
             total_dollars_in_vault =
                 total_dollars_in_vault.checked_add(total_amount_dollars_for_address)?;
@@ -734,12 +734,12 @@ fn execute_process_new_entries_and_exits(
             .collect();
 
         for new_entry in new_entries.iter() {
+            let dollars_asset0 =
+                current_price_asset0.checked_mul(Decimal::new(new_entry.1[0].amount))?;
             let dollars_asset1 =
-                current_price_asset1.checked_mul(Decimal::new(new_entry.1[0].amount))?;
-            let dollars_asset2 =
-                current_price_asset2.checked_mul(Decimal::new(new_entry.1[1].amount))?;
+                current_price_asset1.checked_mul(Decimal::new(new_entry.1[1].amount))?;
 
-            let total_amount_dollars_for_address = dollars_asset1.checked_add(dollars_asset2)?;
+            let total_amount_dollars_for_address = dollars_asset0.checked_add(dollars_asset1)?;
 
             total_dollars_in_vault =
                 total_dollars_in_vault.checked_add(total_amount_dollars_for_address)?;
@@ -762,7 +762,7 @@ fn execute_process_new_entries_and_exits(
         ACCOUNTS_PENDING_ACTIVATION.clear(deps.storage);
         ASSETS_PENDING_ACTIVATION.save(
             deps.storage,
-            &vec![coin(0, config.asset1.denom), coin(0, config.asset2.denom)],
+            &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
         )?;
 
         // Save last update to current block time/height
@@ -809,6 +809,25 @@ fn execute_swap_exact_amount_in(
     let assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
 
     // We are not allowed to use more than what we have currently available in the vault
+    if token_in.denom == config.asset0.denom {
+        let balance_asset0 = deps.querier.query_balance(
+            env.contract.address.to_owned(),
+            config.asset0.denom.to_owned(),
+        )?;
+
+        let available_to_swap_asset0 = coin(
+            balance_asset0
+                .amount
+                .checked_sub(assets_pending[0].amount)?
+                .u128(),
+            config.asset0.denom.to_owned(),
+        );
+
+        if token_in.amount > available_to_swap_asset0.amount {
+            return Err(ContractError::CannotSwapMoreThanAvailable {});
+        }
+    }
+
     if token_in.denom == config.asset1.denom {
         let balance_asset1 = deps.querier.query_balance(
             env.contract.address.to_owned(),
@@ -818,31 +837,12 @@ fn execute_swap_exact_amount_in(
         let available_to_swap_asset1 = coin(
             balance_asset1
                 .amount
-                .checked_sub(assets_pending[0].amount)?
+                .checked_sub(assets_pending[1].amount)?
                 .u128(),
             config.asset1.denom.to_owned(),
         );
 
         if token_in.amount > available_to_swap_asset1.amount {
-            return Err(ContractError::CannotSwapMoreThanAvailable {});
-        }
-    }
-
-    if token_in.denom == config.asset2.denom {
-        let balance_asset2 = deps.querier.query_balance(
-            env.contract.address.to_owned(),
-            config.asset2.denom.to_owned(),
-        )?;
-
-        let available_to_swap_asset2 = coin(
-            balance_asset2
-                .amount
-                .checked_sub(assets_pending[1].amount)?
-                .u128(),
-            config.asset2.denom.to_owned(),
-        );
-
-        if token_in.amount > available_to_swap_asset2.amount {
             return Err(ContractError::CannotSwapMoreThanAvailable {});
         }
     }
@@ -881,6 +881,25 @@ fn execute_split_route_swap_exact_amount_in(
     }
 
     // We are not allowed to use more than what we have currently available in the vault
+    if token_in_denom == config.asset0.denom {
+        let balance_asset0 = deps.querier.query_balance(
+            env.contract.address.to_owned(),
+            config.asset0.denom.to_owned(),
+        )?;
+
+        let available_to_swap_asset0 = coin(
+            balance_asset0
+                .amount
+                .checked_sub(assets_pending[0].amount)?
+                .u128(),
+            config.asset0.denom.to_owned(),
+        );
+
+        if token_in_amount > available_to_swap_asset0.amount.u128() {
+            return Err(ContractError::CannotSwapMoreThanAvailable {});
+        }
+    }
+
     if token_in_denom == config.asset1.denom {
         let balance_asset1 = deps.querier.query_balance(
             env.contract.address.to_owned(),
@@ -890,31 +909,12 @@ fn execute_split_route_swap_exact_amount_in(
         let available_to_swap_asset1 = coin(
             balance_asset1
                 .amount
-                .checked_sub(assets_pending[0].amount)?
+                .checked_sub(assets_pending[1].amount)?
                 .u128(),
             config.asset1.denom.to_owned(),
         );
 
         if token_in_amount > available_to_swap_asset1.amount.u128() {
-            return Err(ContractError::CannotSwapMoreThanAvailable {});
-        }
-    }
-
-    if token_in_denom == config.asset2.denom {
-        let balance_asset2 = deps.querier.query_balance(
-            env.contract.address.to_owned(),
-            config.asset2.denom.to_owned(),
-        )?;
-
-        let available_to_swap_asset2 = coin(
-            balance_asset2
-                .amount
-                .checked_sub(assets_pending[1].amount)?
-                .u128(),
-            config.asset2.denom.to_owned(),
-        );
-
-        if token_in_amount > available_to_swap_asset2.amount.u128() {
             return Err(ContractError::CannotSwapMoreThanAvailable {});
         }
     }
@@ -993,7 +993,7 @@ fn execute_close_vault(deps: DepsMut, info: MessageInfo) -> Result<Response, Con
     ACCOUNTS_PENDING_ACTIVATION.clear(deps.storage);
     ASSETS_PENDING_ACTIVATION.save(
         deps.storage,
-        &vec![coin(0, config.asset1.denom), coin(0, config.asset2.denom)],
+        &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
     )?;
     ADDRESSES_WAITING_FOR_EXIT.save(deps.storage, &addresses_waiting_for_exit)?;
     VAULT_TERMINATED.save(deps.storage, &true)?;
@@ -1064,32 +1064,32 @@ fn query_active_vault_assets(deps: Deps, env: Env) -> StdResult<ActiveVaultAsset
     let assets_pending = ASSETS_PENDING_ACTIVATION
         .may_load(deps.storage)?
         .unwrap_or(vec![
+            coin(0, CONFIG.load(deps.storage)?.asset0.denom),
             coin(0, CONFIG.load(deps.storage)?.asset1.denom),
-            coin(0, CONFIG.load(deps.storage)?.asset2.denom),
         ]);
 
-    let balance_asset1 = deps.querier.query_balance(
+    let balance_asset0 = deps.querier.query_balance(
         env.contract.address.to_owned(),
-        config.asset1.denom.to_owned(),
+        config.asset0.denom.to_owned(),
     )?;
-    let balance_asset2 = deps
+    let balance_asset1 = deps
         .querier
-        .query_balance(env.contract.address, config.asset2.denom.to_owned())?;
+        .query_balance(env.contract.address, config.asset1.denom.to_owned())?;
 
     Ok(ActiveVaultAssetsResponse {
-        asset1: coin(
-            balance_asset1
+        asset0: coin(
+            balance_asset0
                 .amount
                 .checked_sub(assets_pending[0].amount)?
                 .u128(),
-            config.asset1.denom,
+            config.asset0.denom,
         ),
-        asset2: coin(
-            balance_asset2
+        asset1: coin(
+            balance_asset1
                 .amount
                 .checked_sub(assets_pending[1].amount)?
                 .u128(),
-            config.asset2.denom,
+            config.asset1.denom,
         ),
     })
 }
@@ -1125,11 +1125,11 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response
 
 // Helpers
 fn verify_config(config: &Config, pool: Pool) -> Result<(), ContractError> {
-    if config.asset1.denom != pool.token0 && config.asset1.denom != pool.token1 {
+    if config.asset0.denom != pool.token0 && config.asset0.denom != pool.token1 {
         return Err(ContractError::InvalidConfigAsset {});
     }
 
-    if config.asset2.denom != pool.token0 && config.asset2.denom != pool.token1 {
+    if config.asset1.denom != pool.token0 && config.asset1.denom != pool.token1 {
         return Err(ContractError::InvalidConfigAsset {});
     }
 
@@ -1150,7 +1150,7 @@ fn verify_funds(info: &MessageInfo, config: &Config) -> Result<(), ContractError
     }
 
     for fund in info.funds.iter() {
-        if fund.denom != config.asset1.denom && fund.denom != config.asset2.denom {
+        if fund.denom != config.asset0.denom && fund.denom != config.asset1.denom {
             return Err(ContractError::InvalidFunds {});
         }
     }
@@ -1161,41 +1161,41 @@ fn verify_funds(info: &MessageInfo, config: &Config) -> Result<(), ContractError
 fn verify_availability_of_funds(
     storage: &mut dyn Storage,
     tokens_provided: Vec<Coin>,
+    balance_asset0: Coin,
     balance_asset1: Coin,
-    balance_asset2: Coin,
 ) -> Result<(), ContractError> {
     let assets_pending = ASSETS_PENDING_ACTIVATION.load(storage)?;
     let config = CONFIG.load(storage)?;
 
+    let available_to_add_asset0 = coin(
+        balance_asset0
+            .amount
+            .checked_sub(assets_pending[0].amount)?
+            .u128(),
+        config.asset0.denom.to_owned(),
+    );
+
     let available_to_add_asset1 = coin(
         balance_asset1
             .amount
-            .checked_sub(assets_pending[0].amount)?
+            .checked_sub(assets_pending[1].amount)?
             .u128(),
         config.asset1.denom.to_owned(),
     );
 
-    let available_to_add_asset2 = coin(
-        balance_asset2
-            .amount
-            .checked_sub(assets_pending[1].amount)?
-            .u128(),
-        config.asset2.denom.to_owned(),
-    );
-
     for token_provided in tokens_provided.iter() {
+        if token_provided.denom == config.asset0.denom
+            && token_provided.amount > available_to_add_asset0.amount
+        {
+            return Err(ContractError::CannotAddMoreThenAvailableForAsset {
+                asset: config.asset0.denom,
+            });
+        }
         if token_provided.denom == config.asset1.denom
             && token_provided.amount > available_to_add_asset1.amount
         {
             return Err(ContractError::CannotAddMoreThenAvailableForAsset {
                 asset: config.asset1.denom,
-            });
-        }
-        if token_provided.denom == config.asset2.denom
-            && token_provided.amount > available_to_add_asset2.amount
-        {
-            return Err(ContractError::CannotAddMoreThenAvailableForAsset {
-                asset: config.asset2.denom,
             });
         }
     }

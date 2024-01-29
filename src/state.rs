@@ -61,8 +61,8 @@ pub const VAULT_TERMINATED: Item<bool> = Item::new(TopKey::VaultTerminated.as_st
 #[cw_serde]
 pub struct Config {
     pub pool_id: u64,
+    pub asset0: PythAsset,
     pub asset1: PythAsset,
-    pub asset2: PythAsset,
     pub dollar_cap: Option<Uint128>,
     pub pyth_contract_address: Addr,
     pub update_frequency: Frequency,

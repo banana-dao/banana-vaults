@@ -14,8 +14,8 @@ pub struct InstantiateMsg {
     // Update users frequency (adding users that want to join and removing users that want to leave)
     pub update_frequency: Frequency,
     // CL Assets with their corresponding pyth price feed
+    pub asset0: PythAsset,
     pub asset1: PythAsset,
-    pub asset2: PythAsset,
     pub dollar_cap: Option<Uint128>, // with 8 decimals. Example: If vault cap is 50k USD we pass here 50000 * 10^8 = "5000000000000"
     // Exit vault commission (in %)
     pub exit_commission: Option<Decimal>,
@@ -39,6 +39,7 @@ pub struct PythAsset {
     pub identifier: PriceIdentifier,
     // Need to know decimals to convert from pyth price to asset price
     pub decimals: u64,
+    // The minimum amount of tokens that can be deposited in a single tx
 }
 
 #[cw_ownable_execute]
@@ -117,8 +118,8 @@ pub enum QueryMsg {
 
 #[cw_serde]
 pub struct ActiveVaultAssetsResponse {
+    pub asset0: Coin,
     pub asset1: Coin,
-    pub asset2: Coin,
 }
 
 #[cw_serde]
