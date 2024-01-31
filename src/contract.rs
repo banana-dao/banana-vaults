@@ -345,9 +345,7 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
 
     Ok(Response::new()
         .add_attribute("action", "join_banana_vault")
-        .add_attribute("address", info.sender)
-        .add_attribute("amount_asset_1", info.funds[0].amount)
-        .add_attribute("amount_asset_2", info.funds[1].amount))
+        .add_attribute("address", info.sender))
 }
 
 fn execute_leave(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
