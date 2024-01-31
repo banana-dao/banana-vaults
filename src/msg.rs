@@ -10,12 +10,17 @@ use crate::state::Config;
 
 #[cw_serde]
 pub struct InstantiateMsg {
+    // Some metadata about the vault
+    pub name: String,
+    pub description: Option<String>,
+    pub image: Option<String>,
+    // Must be a CL pool
     pub pool_id: u64,
     // Update users frequency (adding users that want to join and removing users that want to leave)
     pub update_frequency: Frequency,
     // CL Assets with their corresponding pyth price feed
-    pub asset0: PythAsset,
-    pub asset1: PythAsset,
+    pub asset0: VaultAsset,
+    pub asset1: VaultAsset,
     pub dollar_cap: Option<Uint128>, // with 8 decimals. Example: If vault cap is 50k USD we pass here 50000 * 10^8 = "5000000000000"
     // Exit vault commission (in %)
     pub exit_commission: Option<Decimal>,
@@ -34,12 +39,14 @@ pub enum Frequency {
 }
 
 #[cw_serde]
-pub struct PythAsset {
+pub struct VaultAsset {
     pub denom: String,
-    pub identifier: PriceIdentifier,
+    // Pyth asset id
+    pub price_identifier: PriceIdentifier,
     // Need to know decimals to convert from pyth price to asset price
     pub decimals: u64,
     // The minimum amount of tokens that can be deposited in a single tx
+    pub min_deposit: Uint128,
 }
 
 #[cw_ownable_execute]
@@ -47,7 +54,7 @@ pub struct PythAsset {
 pub enum ExecuteMsg {
     // If for some reason the pyth oracle contract address or the price identifiers change, we can update it (also for testing)
     ModifyConfig {
-        config: Config,
+        config: Box<Config>,
     },
     // Create position
     CreatePosition {
@@ -118,7 +125,7 @@ pub enum QueryMsg {
     #[returns(Decimal)]
     VaultRatio { address: Addr },
     #[returns(Decimal)]
-    TotalActiveInDollars {},
+    TotalActiveDollars {},
 }
 
 #[cw_serde]

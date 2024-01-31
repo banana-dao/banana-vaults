@@ -88,6 +88,9 @@ pub fn instantiate(
     };
 
     let config = Config {
+        name: msg.name,
+        description: msg.description,
+        image: msg.image,
         pool_id: msg.pool_id,
         asset0: msg.asset0,
         asset1: msg.asset1,
@@ -104,6 +107,9 @@ pub fn instantiate(
 
     // Check that funds sent match with config
     verify_funds(&info, &config)?;
+
+    // Check that funds sent are above minimum deposit
+    verify_deposit_minimum(&info, &config)?;
 
     CONFIG.save(deps.storage, &config)?;
     ASSETS_PENDING_ACTIVATION.save(
@@ -146,7 +152,7 @@ pub fn execute(
 ) -> Result<Response, ContractError> {
     match msg {
         ExecuteMsg::UpdateOwnership(action) => execute_update_ownership(deps, env, info, action),
-        ExecuteMsg::ModifyConfig { config } => execute_modify_config(deps, env, info, config),
+        ExecuteMsg::ModifyConfig { config } => execute_modify_config(deps, env, info, *config),
         ExecuteMsg::Join {} => execute_join(deps, info),
         ExecuteMsg::Leave {} => execute_leave(deps, info),
         ExecuteMsg::CreatePosition {
@@ -270,6 +276,7 @@ fn execute_modify_config(
 fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     verify_funds(&info, &config)?;
+    verify_deposit_minimum(&info, &config)?;
 
     // Check if vault is closed
     if VAULT_TERMINATED.load(deps.storage)? {
@@ -344,9 +351,7 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
 
     Ok(Response::new()
         .add_attribute("action", "join_banana_vault")
-        .add_attribute("address", info.sender)
-        .add_attribute("amount_asset_1", info.funds[0].amount)
-        .add_attribute("amount_asset_2", info.funds[1].amount))
+        .add_attribute("address", info.sender))
 }
 
 fn execute_leave(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
@@ -444,7 +449,7 @@ fn execute_create_position(
     Ok(Response::new()
         .add_message(msg_add_position)
         .add_attribute("action", "add_position"))
-}
+    }
 
 #[allow(clippy::too_many_arguments)]
 fn execute_add_to_position(
@@ -579,11 +584,11 @@ fn execute_collect_rewards(
             })
         }
     }
+
     Ok(
         Response::new()
         .add_messages(messages)
-        .add_attribute("action", "collect_rewards"),
-    )
+        .add_attribute("action", "collect_rewards"))
 }
 
 // This can only be done by contract internally
@@ -714,7 +719,7 @@ fn execute_process_new_entries_and_exits(
         let price_feed_response_asset0: PriceFeedResponse = query_price_feed(
             &deps.querier,
             config.pyth_contract_address.to_owned(),
-            config.asset0.identifier,
+            config.asset0.price_identifier,
         )?;
         let price_feed_asset0 = price_feed_response_asset0.price_feed;
         let current_price_asset0 = Decimal::from_ratio(
@@ -725,7 +730,7 @@ fn execute_process_new_entries_and_exits(
         let price_feed_response_asset1: PriceFeedResponse = query_price_feed(
             &deps.querier,
             config.pyth_contract_address,
-            config.asset1.identifier,
+            config.asset1.price_identifier,
         )?;
         let price_feed_asset1 = price_feed_response_asset1.price_feed;
         let current_price_asset1 = Decimal::from_ratio(
@@ -1091,7 +1096,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::TotalPendingAssets {} => to_json_binary(&query_total_pending_assets(deps)?),
         QueryMsg::PendingJoin { address } => to_json_binary(&query_pending_join(deps, address)?),
         QueryMsg::VaultRatio { address } => to_json_binary(&query_vault_ratio(deps, address)?),
-        QueryMsg::TotalActiveInDollars {} => to_json_binary(&query_total_active_in_dollars(deps)?),
+        QueryMsg::TotalActiveDollars {} => to_json_binary(&query_total_active_in_dollars(deps)?),
     }
 }
 
@@ -1256,6 +1261,27 @@ fn verify_funds(info: &MessageInfo, config: &Config) -> Result<(), ContractError
     for fund in info.funds.iter() {
         if fund.denom != config.asset0.denom && fund.denom != config.asset1.denom {
             return Err(ContractError::InvalidFunds {});
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_deposit_minimum(info: &MessageInfo, config: &Config) -> Result<(), ContractError> {
+    for token_provided in info.funds.iter() {
+        if token_provided.denom == config.asset0.denom
+            && token_provided.amount.lt(&config.asset0.min_deposit)
+        {
+            return Err(ContractError::DepositBelowMinimum {
+                denom: config.asset0.denom.clone(),
+            });
+        }
+        if token_provided.denom == config.asset1.denom
+            && token_provided.amount.lt(&config.asset1.min_deposit)
+        {
+            return Err(ContractError::DepositBelowMinimum {
+                denom: config.asset1.denom.clone(),
+            });
         }
     }
 

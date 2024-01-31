@@ -65,4 +65,7 @@ pub enum ContractError {
 
     #[error("No position found")]
     NoPositionsOpen {},
+
+    #[error("Amount of {} provided is below minimum", denom)]
+    DepositBelowMinimum { denom: String },
 }
