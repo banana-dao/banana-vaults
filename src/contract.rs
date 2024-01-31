@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     error::ContractError,
-    msg::{ActiveVaultAssetsResponse, ExecuteMsg, Frequency, InstantiateMsg, MigrateMsg, QueryMsg},
+    msg::{TotalAssetsResponse, ExecuteMsg, Frequency, InstantiateMsg, MigrateMsg, QueryMsg},
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
         CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_EXIT, LAST_UPDATE, TOTAL_ACTIVE_IN_DOLLARS,
@@ -10,15 +10,13 @@ use crate::{
     },
 };
 use cosmwasm_std::{
-    coin, entry_point, to_json_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Decimal, Deps,
-    DepsMut, Env, MessageInfo, Order, Response, StdError, StdResult, Storage, Uint128, WasmMsg,
+    coin, entry_point, to_json_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Order, Response, StdError, StdResult, Storage, Uint128, WasmMsg
 };
 use cw2::{get_contract_version, set_contract_version};
 use cw_ownable::{assert_owner, get_ownership, initialize_owner, update_ownership, Action};
 use osmosis_std_modified::types::osmosis::{
     concentratedliquidity::v1beta1::{
-        ConcentratedliquidityQuerier, MsgAddToPosition, MsgCreatePosition, Pool,
-        UserPositionsResponse,
+        ConcentratedliquidityQuerier, MsgAddToPosition, MsgCollectIncentives, MsgCreatePosition, Pool, UserPositionsResponse
     },
     gamm::v1beta1::MsgSwapExactAmountIn,
     poolmanager::v1beta1::{
@@ -187,6 +185,7 @@ pub fn execute(
             position_id,
             liquidity_amount,
         } => execute_withdraw_position(deps, env, info, position_id, liquidity_amount),
+        ExecuteMsg::CollectRewards {} => execute_collect_rewards(deps, env, info),
         ExecuteMsg::SwapExactAmountIn {
             routes,
             token_in,
@@ -544,6 +543,47 @@ fn execute_withdraw_position(
     }
 
     Ok(response.add_attribute("action", "withdraw_position"))
+}
+
+fn execute_collect_rewards(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    assert_owner(deps.storage, &info.sender)?;
+
+    let config = CONFIG.load(deps.storage)?;
+
+    let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
+    let user_positions_response: UserPositionsResponse =
+        cl_querier.user_positions(env.contract.address.to_string(), config.pool_id, None)?;
+
+    let mut messages = vec![];
+
+    if user_positions_response.positions.is_empty() {
+        return Err(ContractError::NoPositionsOpen {});
+    }
+
+    for position in user_positions_response.positions.iter() {
+        let id = position.to_owned().position.unwrap_or_default().position_id;
+        if !position.claimable_incentives.is_empty() {
+            messages.push(MsgCollectIncentives {
+                position_ids: vec![id],
+                sender: env.contract.address.to_string(),
+            })
+        }
+        if !position.claimable_spread_rewards.is_empty() {
+            messages.push(MsgCollectIncentives {
+                position_ids: vec![id],
+                sender: env.contract.address.to_string(),
+            })
+        }
+    }
+    Ok(
+        Response::new()
+        .add_messages(messages)
+        .add_attribute("action", "collect_rewards"),
+    )
 }
 
 // This can only be done by contract internally
@@ -1047,7 +1087,8 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::Config {} => to_json_binary(&query_config(deps)?),
         QueryMsg::Ownership {} => to_json_binary(&get_ownership(deps.storage)?),
-        QueryMsg::ActiveVaultAssets {} => to_json_binary(&query_active_vault_assets(deps, env)?),
+        QueryMsg::TotalActiveAssets {} => to_json_binary(&query_total_active_assets(deps, env)?),
+        QueryMsg::TotalPendingAssets {} => to_json_binary(&query_total_pending_assets(deps)?),
         QueryMsg::PendingJoin { address } => to_json_binary(&query_pending_join(deps, address)?),
         QueryMsg::VaultRatio { address } => to_json_binary(&query_vault_ratio(deps, address)?),
         QueryMsg::TotalActiveInDollars {} => to_json_binary(&query_total_active_in_dollars(deps)?),
@@ -1059,7 +1100,7 @@ fn query_config(deps: Deps) -> StdResult<Config> {
     Ok(config)
 }
 
-fn query_active_vault_assets(deps: Deps, env: Env) -> StdResult<ActiveVaultAssetsResponse> {
+fn query_total_active_assets(deps: Deps, env: Env) -> StdResult<TotalAssetsResponse> {
     let config = CONFIG.load(deps.storage)?;
     let assets_pending = ASSETS_PENDING_ACTIVATION
         .may_load(deps.storage)?
@@ -1068,15 +1109,57 @@ fn query_active_vault_assets(deps: Deps, env: Env) -> StdResult<ActiveVaultAsset
             coin(0, CONFIG.load(deps.storage)?.asset1.denom),
         ]);
 
-    let balance_asset0 = deps.querier.query_balance(
-        env.contract.address.to_owned(),
+    let address = env.contract.address.to_string();
+
+    let mut balance_asset0 = deps.querier.query_balance(
+        address.clone(),
         config.asset0.denom.to_owned(),
     )?;
-    let balance_asset1 = deps
+    let mut balance_asset1 = deps
         .querier
         .query_balance(env.contract.address, config.asset1.denom.to_owned())?;
 
-    Ok(ActiveVaultAssetsResponse {
+    let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
+    for position in cl_querier
+        .user_positions(address, config.pool_id, None)?
+        .positions
+        .iter()
+    {
+        balance_asset0.amount = balance_asset0
+            .amount
+            .checked_add(position.asset0.clone().unwrap_or_default().amount.parse::<Uint128>()?)?;
+        balance_asset1.amount = balance_asset1 
+            .amount
+            .checked_add(position.asset1.clone().unwrap_or_default().amount.parse::<Uint128>()?)?;
+
+        for coin in position.claimable_incentives.iter() {
+            if coin.denom == config.asset0.denom {
+                balance_asset0.amount = balance_asset0
+                    .amount
+                    .checked_add(coin.amount.parse::<Uint128>()?)?;
+            }
+            if coin.denom == config.asset1.denom {
+                balance_asset1.amount = balance_asset1
+                    .amount
+                    .checked_add(coin.amount.parse::<Uint128>()?)?;
+            }
+        }
+
+        for coin in position.claimable_spread_rewards.iter() {
+            if coin.denom == config.asset0.denom {
+                balance_asset0.amount = balance_asset0
+                    .amount
+                    .checked_add(coin.amount.parse::<Uint128>()?)?;
+            }
+            if coin.denom == config.asset1.denom {
+                balance_asset1.amount = balance_asset1
+                    .amount
+                    .checked_add(coin.amount.parse::<Uint128>()?)?;
+            }
+        }
+    } 
+    
+    Ok(TotalAssetsResponse {
         asset0: coin(
             balance_asset0
                 .amount
@@ -1091,6 +1174,27 @@ fn query_active_vault_assets(deps: Deps, env: Env) -> StdResult<ActiveVaultAsset
                 .u128(),
             config.asset1.denom,
         ),
+    })
+}
+
+fn query_total_pending_assets(deps: Deps) -> StdResult<TotalAssetsResponse> {
+    let config = CONFIG.load(deps.storage)?;
+    let asset0_denom = config.asset0.denom;
+    let asset1_denom = config.asset1.denom;
+    let mut asset0 = coin(0, asset0_denom.to_owned());
+    let mut asset1 = coin(0, asset1_denom.to_owned());
+
+    for asset in ASSETS_PENDING_ACTIVATION.load(deps.storage)? {
+        if asset.denom == asset0_denom {
+            asset0.amount += asset.amount;
+        } else if asset.denom == asset1_denom {
+            asset1.amount += asset.amount;
+        }
+    }
+    
+    Ok(TotalAssetsResponse {
+        asset0,
+        asset1,
     })
 }
 

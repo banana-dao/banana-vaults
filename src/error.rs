@@ -62,4 +62,7 @@ pub enum ContractError {
 
     #[error("Cant force exits yet. Still {} seconds remaining", seconds)]
     CantForceExitsYet { seconds: u64 },
+
+    #[error("No position found")]
+    NoPositionsOpen {},
 }

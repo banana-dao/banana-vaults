@@ -70,6 +70,8 @@ pub enum ExecuteMsg {
         position_id: u64,
         liquidity_amount: String,
     },
+    // Claim rewards
+    CollectRewards {},
     // Swap Exact Amount In
     SwapExactAmountIn {
         routes: Vec<SwapAmountInRoute>,
@@ -104,8 +106,11 @@ pub enum QueryMsg {
     #[returns(Config)]
     Config {},
     // Tells you how much of each vault asset is currently being used (not pending join)
-    #[returns(ActiveVaultAssetsResponse)]
-    ActiveVaultAssets {},
+    #[returns(TotalAssetsResponse)]
+    TotalActiveAssets {},
+    // Tells you how much is pending join in total
+    #[returns(TotalAssetsResponse)]
+    TotalPendingAssets {},
     // Tells you how much of each vault asset is pending to join for an address
     #[returns(Vec<Coin>)]
     PendingJoin { address: Addr },
@@ -117,7 +122,7 @@ pub enum QueryMsg {
 }
 
 #[cw_serde]
-pub struct ActiveVaultAssetsResponse {
+pub struct TotalAssetsResponse {
     pub asset0: Coin,
     pub asset1: Coin,
 }
