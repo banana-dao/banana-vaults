@@ -20,12 +20,14 @@ pub struct InstantiateMsg {
     pub update_frequency: Frequency,
     // Seconds after which a price quote is rejected and joins/leaves can't be processed
     pub price_expiry: u64,
+    //  Uptime must be enforced to accurately calculate incentives
+    pub min_uptime: u64,
     // CL Assets with their corresponding pyth price feed
     pub asset0: VaultAsset,
     pub asset1: VaultAsset,
     pub dollar_cap: Option<Uint128>, // with 8 decimals. Example: If vault cap is 50k USD we pass here 50000 * 10^8 = "5000000000000"
-    // Exit vault commission (in %)
-    pub exit_commission: Option<Decimal>,
+    // Vault commission (in %)
+    pub commission: Option<Decimal>,
     // If no address specified, contract admin will be receiver of commissions
     pub commission_receiver: Option<Addr>,
     // Addresses allowed to exceed the deposit cap
