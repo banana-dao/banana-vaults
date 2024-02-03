@@ -18,6 +18,8 @@ pub struct InstantiateMsg {
     pub pool_id: u64,
     // Update users frequency (adding users that want to join and removing users that want to leave)
     pub update_frequency: Frequency,
+    // Seconds after which a price quote is rejected and joins/leaves can't be processed
+    pub price_expiry: u64,
     // CL Assets with their corresponding pyth price feed
     pub asset0: VaultAsset,
     pub asset1: VaultAsset,
@@ -30,6 +32,8 @@ pub struct InstantiateMsg {
     pub whitelisted_depositors: Option<Vec<Addr>>,
     // Flag to take the right pyth contract address - true for mainnet, false for testnet
     pub mainnet: bool,
+    // Vault operator address
+    pub operator: Addr,
 }
 
 #[cw_serde]
@@ -44,7 +48,7 @@ pub struct VaultAsset {
     // Pyth asset id
     pub price_identifier: PriceIdentifier,
     // Need to know decimals to convert from pyth price to asset price
-    pub decimals: u64,
+    pub decimals: u32,
     // The minimum amount of tokens that can be deposited in a single tx
     pub min_deposit: Uint128,
 }
@@ -124,8 +128,6 @@ pub enum QueryMsg {
     // How much of the vault this address owns
     #[returns(Decimal)]
     VaultRatio { address: Addr },
-    #[returns(Decimal)]
-    TotalActiveDollars {},
 }
 
 #[cw_serde]

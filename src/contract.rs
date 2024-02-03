@@ -5,7 +5,7 @@ use crate::{
     msg::{TotalAssetsResponse, ExecuteMsg, Frequency, InstantiateMsg, MigrateMsg, QueryMsg},
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
-        CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_EXIT, LAST_UPDATE, TOTAL_ACTIVE_IN_DOLLARS,
+        CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_EXIT, LAST_UPDATE,
         VAULT_RATIO, VAULT_TERMINATED,
     },
 };
@@ -28,7 +28,7 @@ use osmosis_std_modified::types::{
     cosmos::base::v1beta1::Coin as CosmosCoin,
     osmosis::concentratedliquidity::v1beta1::MsgWithdrawPosition,
 };
-use pyth_sdk_cw::{query_price_feed, PriceFeedResponse};
+use pyth_sdk_cw::query_price_feed;
 
 // version info for migration info
 const CONTRACT_NAME: &str = env!("CARGO_PKG_NAME");
@@ -51,7 +51,10 @@ pub fn instantiate(
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-    initialize_owner(deps.storage, deps.api, Some(info.sender.as_str()))?;
+
+    // validate and set the operator address
+    deps.api.addr_validate(msg.operator.as_str())?;
+    initialize_owner(deps.storage, deps.api, Some(msg.operator.as_str()))?;
 
     let pm_querier = PoolmanagerQuerier::new(&deps.querier);
 
@@ -96,6 +99,7 @@ pub fn instantiate(
         asset1: msg.asset1,
         dollar_cap: msg.dollar_cap,
         pyth_contract_address: Addr::unchecked(pyth_contract_address),
+        price_expiry: msg.price_expiry,
         update_frequency: msg.update_frequency.to_owned(),
         exit_commission: msg.exit_commission,
         commission_receiver: msg.commission_receiver.unwrap_or(info.sender.to_owned()),
@@ -132,12 +136,11 @@ pub fn instantiate(
 
     CAP_REACHED.save(deps.storage, &false)?;
     HALT_EXITS_AND_JOINS.save(deps.storage, &false)?;
-    TOTAL_ACTIVE_IN_DOLLARS.save(deps.storage, &Decimal::zero())?;
     VAULT_TERMINATED.save(deps.storage, &false)?;
     LAST_EXIT.save(deps.storage, &env.block.time.seconds())?;
 
     Ok(Response::new()
-        .add_attribute("action", "instantiate_banana_vault")
+        .add_attribute("action", "banana_vault_instantiate")
         .add_attribute("contract_name", CONTRACT_NAME)
         .add_attribute("contract_version", CONTRACT_VERSION)
         .add_attribute("owner", info.sender))
@@ -269,7 +272,7 @@ fn execute_modify_config(
     }
 
     Ok(Response::new()
-        .add_attribute("action", "modify_config")
+        .add_attribute("action", "banana_vault_modify_config")
         .add_attribute("new_pyth_address", new_config.pyth_contract_address))
 }
 
@@ -350,7 +353,7 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
     }
 
     Ok(Response::new()
-        .add_attribute("action", "join_banana_vault")
+        .add_attribute("action", "banana_vault_join")
         .add_attribute("address", info.sender))
 }
 
@@ -395,7 +398,7 @@ fn execute_leave(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractE
     }
 
     Ok(response
-        .add_attribute("action", "leave_banana_vault")
+        .add_attribute("action", "banana_vault_leave")
         .add_attribute("sender", info.sender))
 }
 
@@ -448,7 +451,7 @@ fn execute_create_position(
 
     Ok(Response::new()
         .add_message(msg_add_position)
-        .add_attribute("action", "add_position"))
+        .add_attribute("action", "banana_vault_create_position"))
     }
 
 #[allow(clippy::too_many_arguments)]
@@ -498,7 +501,7 @@ fn execute_add_to_position(
 
     Ok(Response::new()
         .add_message(msg_add_to_position)
-        .add_attribute("action", "add_to_position"))
+        .add_attribute("action", "banana_vault_add_to_position"))
 }
 
 fn execute_withdraw_position(
@@ -547,7 +550,7 @@ fn execute_withdraw_position(
         }
     }
 
-    Ok(response.add_attribute("action", "withdraw_position"))
+    Ok(response.add_attribute("action", "banana_vault_withdraw_position"))
 }
 
 fn execute_collect_rewards(
@@ -588,7 +591,7 @@ fn execute_collect_rewards(
     Ok(
         Response::new()
         .add_messages(messages)
-        .add_attribute("action", "collect_rewards"))
+        .add_attribute("action", "banana_vault_collect_rewards"))
 }
 
 // This can only be done by contract internally
@@ -616,9 +619,9 @@ fn execute_process_new_entries_and_exits(
             env.contract.address.to_owned(),
             config.asset0.denom.to_owned(),
         )?;
-        let balance_asset1 = deps
-            .querier
-            .query_balance(env.contract.address, config.asset1.denom.to_owned())?;
+        let balance_asset1 = deps.querier.query_balance(
+            env.contract.address, 
+            config.asset1.denom.to_owned())?;
 
         let assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
 
@@ -716,27 +719,45 @@ fn execute_process_new_entries_and_exits(
         ADDRESSES_WAITING_FOR_EXIT.save(deps.storage, &vec![])?;
         // After processing all exits, we are going to see how much the previous vault participants and new participants own (in dollars) to recalculate vault ratios
         // Get prices in dollars for each asset
-        let price_feed_response_asset0: PriceFeedResponse = query_price_feed(
-            &deps.querier,
-            config.pyth_contract_address.to_owned(),
-            config.asset0.price_identifier,
-        )?;
-        let price_feed_asset0 = price_feed_response_asset0.price_feed;
-        let current_price_asset0 = Decimal::from_ratio(
-            Uint128::new(price_feed_asset0.get_price_unchecked().price as u128),
-            config.asset0.decimals,
-        );
 
-        let price_feed_response_asset1: PriceFeedResponse = query_price_feed(
+        // For safety we check that the price has been updated in the last 2 minutes
+        let current_time = env.block.time.seconds() as i64;
+
+        let current_price_asset0 = match query_price_feed(
+            &deps.querier,
+            config.pyth_contract_address.clone(),
+            config.asset0.price_identifier,
+        )? 
+        .price_feed
+        .get_price_no_older_than(current_time, config.price_expiry)
+        {
+            // If there is a price available, calculate the current price as a Decimal
+            Some(price) => Decimal::from_ratio(
+                price.price as u128,
+                10_u64.pow(config.asset0.decimals),
+            ),
+
+            // Return an error if no price is available within the acceptable age
+            None => return Err(ContractError::StalePrice { seconds: config.price_expiry }),
+        };
+        
+        let current_price_asset1 = match query_price_feed(
             &deps.querier,
             config.pyth_contract_address,
             config.asset1.price_identifier,
-        )?;
-        let price_feed_asset1 = price_feed_response_asset1.price_feed;
-        let current_price_asset1 = Decimal::from_ratio(
-            Uint128::new(price_feed_asset1.get_price_unchecked().price as u128),
-            config.asset1.decimals,
-        );
+        )?
+        .price_feed
+        .get_price_no_older_than(current_time, config.price_expiry)
+        {
+            // If there is a price available, calculate the current price as a Decimal
+            Some(price) => Decimal::from_ratio(
+               price.price as u128,
+                10_u64.pow(config.asset1.decimals),
+            ),
+
+            // Return an error if no price is available within the acceptable age
+            None => return Err(ContractError::StalePrice { seconds: config.price_expiry }),
+        };
 
         // Now that we have current prices of both assets we are going to see how much each address owns in dollars and store it to recalculate vault ratios
         let mut total_dollars_in_vault = Decimal::zero();
@@ -748,21 +769,21 @@ fn execute_process_new_entries_and_exits(
             .collect();
 
         for ratio in ratios.iter() {
-            let mut amount_assets1 = available_in_vault_asset0.amount.mul_floor(ratio.1);
-            let mut amount_assets2 = available_in_vault_asset1.amount.mul_floor(ratio.1);
+            let mut amount_assets0 = available_in_vault_asset0.amount.mul_floor(ratio.1);
+            let mut amount_assets1 = available_in_vault_asset1.amount.mul_floor(ratio.1);
 
             // If for some reason this address is actually waiting to join with more assets, we will add this here too
             if let Some(funds) =
                 ACCOUNTS_PENDING_ACTIVATION.may_load(deps.storage, ratio.0.to_owned())?
             {
-                amount_assets1 += funds[0].amount;
-                amount_assets2 += funds[1].amount;
+                amount_assets0 += funds[0].amount;
+                amount_assets1 += funds[1].amount;
                 // Remove it from here to avoid processing it again later
                 ACCOUNTS_PENDING_ACTIVATION.remove(deps.storage, ratio.0.to_owned())
             }
 
-            let dollars_asset0 = current_price_asset0.checked_mul(Decimal::new(amount_assets1))?;
-            let dollars_asset1 = current_price_asset1.checked_mul(Decimal::new(amount_assets2))?;
+            let dollars_asset0 = current_price_asset0.checked_mul(Decimal::new(amount_assets0))?;
+            let dollars_asset1 = current_price_asset1.checked_mul(Decimal::new(amount_assets1))?;
 
             let total_amount_dollars_for_address = dollars_asset0.checked_add(dollars_asset1)?;
 
@@ -831,14 +852,11 @@ fn execute_process_new_entries_and_exits(
             }
         }
 
-        // Save it for informational purposes
-        TOTAL_ACTIVE_IN_DOLLARS.save(deps.storage, &total_dollars_in_vault)?;
-
         // All bank messages that need to be sent
         response = response.add_messages(messages)
     }
 
-    Ok(response.add_attribute("action", "process_new_entries_and_exits"))
+    Ok(response.add_attribute("action", "banana_vault_process_new_entries_and_exits"))
 }
 
 fn execute_swap_exact_amount_in(
@@ -905,7 +923,7 @@ fn execute_swap_exact_amount_in(
 
     Ok(Response::new()
         .add_message(msg_swap_exact_amount_in)
-        .add_attribute("action", "swap_exact_amount_in"))
+        .add_attribute("action", "banana_vault_swap"))
 }
 
 fn execute_split_route_swap_exact_amount_in(
@@ -974,19 +992,19 @@ fn execute_split_route_swap_exact_amount_in(
 
     Ok(Response::new()
         .add_message(msg_split_route_swap_exact_amount_in)
-        .add_attribute("action", "swap_split_route_swap_exact_amount_in"))
+        .add_attribute("action", "banana_vault_split_route_swap"))
 }
 
 fn execute_halt(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
     assert_owner(deps.storage, &info.sender)?;
     HALT_EXITS_AND_JOINS.save(deps.storage, &true)?;
-    Ok(Response::new().add_attribute("action", "halt"))
+    Ok(Response::new().add_attribute("action", "banana_vault_halt"))
 }
 
 fn execute_resume(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
     assert_owner(deps.storage, &info.sender)?;
     HALT_EXITS_AND_JOINS.save(deps.storage, &false)?;
-    Ok(Response::new().add_attribute("action", "resume"))
+    Ok(Response::new().add_attribute("action", "banana_vault_resume"))
 }
 
 fn execute_close_vault(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
@@ -1045,7 +1063,7 @@ fn execute_close_vault(deps: DepsMut, info: MessageInfo) -> Result<Response, Con
 
     Ok(Response::new()
         .add_messages(messages)
-        .add_attribute("action", "vault_terminated"))
+        .add_attribute("action", "banana_vault_terminate"))
 }
 
 fn execute_force_exits(deps: DepsMut, env: Env) -> Result<Response, ContractError> {
@@ -1084,7 +1102,7 @@ fn execute_force_exits(deps: DepsMut, env: Env) -> Result<Response, ContractErro
 
     Ok(Response::new()
         .add_messages(messages)
-        .add_attribute("action", "force_exits"))
+        .add_attribute("action", "banana_vault_force_exits"))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -1096,7 +1114,6 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::TotalPendingAssets {} => to_json_binary(&query_total_pending_assets(deps)?),
         QueryMsg::PendingJoin { address } => to_json_binary(&query_pending_join(deps, address)?),
         QueryMsg::VaultRatio { address } => to_json_binary(&query_vault_ratio(deps, address)?),
-        QueryMsg::TotalActiveDollars {} => to_json_binary(&query_total_active_in_dollars(deps)?),
     }
 }
 
@@ -1215,11 +1232,6 @@ fn query_vault_ratio(deps: Deps, address: Addr) -> StdResult<Decimal> {
         .may_load(deps.storage, address)?
         .unwrap_or_default();
     Ok(ratio)
-}
-
-fn query_total_active_in_dollars(deps: Deps) -> StdResult<Decimal> {
-    let amount = TOTAL_ACTIVE_IN_DOLLARS.load(deps.storage)?;
-    Ok(amount)
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]

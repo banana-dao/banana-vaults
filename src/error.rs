@@ -68,4 +68,7 @@ pub enum ContractError {
 
     #[error("Amount of {} provided is below minimum", denom)]
     DepositBelowMinimum { denom: String },
+
+    #[error("Pyth price quote is older than {} seconds, please update", seconds)]
+    StalePrice { seconds: u64 },
 }
