@@ -18,7 +18,7 @@ pub struct InstantiateMsg {
     pub update_frequency: Frequency,
     // Seconds after which a price quote is rejected and joins/leaves can't be processed
     pub price_expiry: u64,
-    //  Uptime must be enforced to accurately calculate incentives
+    //  Uptime must be enforced to accurately calculate commission
     pub min_uptime: Option<u64>,
     // CL Assets with their corresponding pyth price feed
     pub asset0: VaultAsset,
@@ -120,6 +120,8 @@ pub enum QueryMsg {
     // Tells you how much of each vault asset is pending to join for an address
     #[returns(Vec<Coin>)]
     PendingJoin { address: Addr },
+    #[returns(Vec<Addr>)]
+    AccountsPendingExit {},
     // How much of the vault this address owns
     #[returns(Decimal)]
     VaultRatio { address: Addr },

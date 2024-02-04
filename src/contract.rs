@@ -403,6 +403,17 @@ fn execute_create_position(
     assert_owner(deps.storage, &info.sender)?;
     let config = CONFIG.load(deps.storage)?;
 
+    // limit number of open positions to 10 for safety as we don't need more and don't want to bother with pagination
+    let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
+    if cl_querier
+        .user_positions(env.contract.address.to_string(), config.pool_id, None)?
+        .positions
+        .len()
+        >= 10
+    {
+        return Err(ContractError::MaxPositionsReached {});
+    }
+
     let mut messages = vec![];
     let mut attributes: Vec<Attribute> = vec![];
 
@@ -417,20 +428,21 @@ fn execute_create_position(
 
     // execute swap if provided
     if let Some(swap) = swap {
-        let (message, attribute) =
-            prepare_swap(&deps, env.contract.address.to_string(), swap.clone())?;
+        let (message, attribute) = prepare_swap(
+            &mut balance_asset0,
+            &mut balance_asset1,
+            env.contract.address.to_string(),
+            swap.clone(),
+        )?;
         messages.push(message);
         attributes.push(attribute);
-
-        (balance_asset0, balance_asset1) =
-            parse_swap_result(&mut balance_asset0, &mut balance_asset1, swap)?;
     }
 
     verify_availability_of_funds(
         deps.storage,
         tokens_provided.clone(),
-        balance_asset0,
-        balance_asset1,
+        balance_asset0.amount,
+        balance_asset1.amount,
     )?;
 
     messages.push(
@@ -496,12 +508,14 @@ fn execute_add_to_position(
 
     // execute swap if provided
     if let Some(swap) = swap {
-        let (message, attribute) = prepare_swap(&deps, contract_address.to_string(), swap.clone())?;
+        let (message, attribute) = prepare_swap(
+            &mut balance_asset0,
+            &mut balance_asset1,
+            contract_address.to_string(),
+            swap.clone(),
+        )?;
         messages.push(message);
         attributes.push(attribute);
-
-        (balance_asset0, balance_asset1) =
-            parse_swap_result(&mut balance_asset0, &mut balance_asset1, swap)?;
     }
 
     let tokens_provided = vec![
@@ -512,8 +526,8 @@ fn execute_add_to_position(
     verify_availability_of_funds(
         deps.storage,
         tokens_provided.clone(),
-        balance_asset0,
-        balance_asset1,
+        balance_asset0.amount,
+        balance_asset1.amount,
     )?;
 
     messages.push(
@@ -927,53 +941,40 @@ fn execute_process_new_entries_and_exits(
     Ok(response.add_attribute("action", "banana_vault_process_new_entries_and_exits"))
 }
 
+// this function mutates asset0 and asset1 to reflect the new state after the swap
 fn prepare_swap(
-    deps: &DepsMut,
+    asset0: &mut Coin,
+    asset1: &mut Coin,
     sender: String,
     swap: Swap,
 ) -> Result<(CosmosMsg, Attribute), ContractError> {
-    let config = CONFIG.load(deps.storage)?;
-    let assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
-
-    let mut token_in_amount = 0;
+    let mut token_in_amount: Uint128 = Uint128::zero();
     for route in &swap.routes {
-        token_in_amount += route.token_in_amount.parse::<u128>()?;
+        token_in_amount += Uint128::from_str(&route.token_in_amount)?;
     }
 
-    // We are not allowed to use more than what we have currently available in the vault
-    if swap.token_in_denom == config.asset0.denom {
-        let balance_asset0 = deps
-            .querier
-            .query_balance(sender.clone(), config.asset0.denom.to_owned())?;
-
-        let available_to_swap_asset0 = coin(
-            balance_asset0
-                .amount
-                .checked_sub(assets_pending[0].amount)?
-                .u128(),
-            config.asset0.denom.to_owned(),
-        );
-
-        if token_in_amount > available_to_swap_asset0.amount.u128() {
+    // We are not allowed to swap more than what we have currently liquid in the vault
+    if swap.token_in_denom == asset0.denom {
+        if token_in_amount > asset0.amount {
             return Err(ContractError::CannotSwapMoreThanAvailable {});
         }
+        asset0.amount = asset0.amount.checked_sub(token_in_amount)?;
     }
 
-    if swap.token_in_denom == config.asset1.denom {
-        let balance_asset1 = deps
-            .querier
-            .query_balance(sender.clone(), config.asset1.denom.to_owned())?;
-
-        let available_to_swap_asset1 = coin(
-            balance_asset1
-                .amount
-                .checked_sub(assets_pending[1].amount)?
-                .u128(),
-            config.asset1.denom.to_owned(),
-        );
-
-        if token_in_amount > available_to_swap_asset1.amount.u128() {
+    if swap.token_in_denom == asset1.denom {
+        if token_in_amount > asset1.amount {
             return Err(ContractError::CannotSwapMoreThanAvailable {});
+        }
+        asset1.amount = asset1.amount.checked_sub(token_in_amount)?;
+    }
+
+    // every route will end in the same denom. we get the final denom from the first route and add the min amount out to the swap output asset
+    if let Some(last_pool) = swap.routes.get(0).and_then(|route| route.pools.last()) {
+        let token_out_min_amount = Uint128::from_str(&swap.token_out_min_amount)?;
+        if last_pool.token_out_denom == asset0.denom {
+            asset0.amount += token_out_min_amount;
+        } else if last_pool.token_out_denom == asset1.denom {
+            asset1.amount += token_out_min_amount;
         }
     }
 
@@ -1109,6 +1110,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::TotalActiveAssets {} => to_json_binary(&query_total_active_assets(deps, env)?),
         QueryMsg::TotalPendingAssets {} => to_json_binary(&query_total_pending_assets(deps)?),
         QueryMsg::PendingJoin { address } => to_json_binary(&query_pending_join(deps, address)?),
+        QueryMsg::AccountsPendingExit {} => to_json_binary(&query_pending_exit(deps)?),
         QueryMsg::VaultRatio { address } => to_json_binary(&query_vault_ratio(deps, address)?),
     }
 }
@@ -1236,6 +1238,11 @@ fn query_pending_join(deps: Deps, address: Addr) -> StdResult<Vec<Coin>> {
     Ok(assets)
 }
 
+fn query_pending_exit(deps: Deps) -> StdResult<Vec<Addr>> {
+    let addresses = ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)?;
+    Ok(addresses)
+}
+
 fn query_vault_ratio(deps: Deps, address: Addr) -> StdResult<Decimal> {
     let ratio = VAULT_RATIO
         .may_load(deps.storage, address)?
@@ -1312,72 +1319,34 @@ fn verify_deposit_minimum(info: &MessageInfo, config: &Config) -> Result<(), Con
 fn verify_availability_of_funds(
     storage: &mut dyn Storage,
     tokens_provided: Vec<Coin>,
-    balance_asset0: Coin,
-    balance_asset1: Coin,
+    amount_asset0: Uint128,
+    amount_asset1: Uint128,
 ) -> Result<(), ContractError> {
     let assets_pending = ASSETS_PENDING_ACTIVATION.load(storage)?;
     let config = CONFIG.load(storage)?;
 
-    let available_to_add_asset0 = coin(
-        balance_asset0
-            .amount
-            .checked_sub(assets_pending[0].amount)?
-            .u128(),
-        config.asset0.denom.to_owned(),
-    );
-
-    let available_to_add_asset1 = coin(
-        balance_asset1
-            .amount
-            .checked_sub(assets_pending[1].amount)?
-            .u128(),
-        config.asset1.denom.to_owned(),
-    );
-
     for token_provided in tokens_provided.iter() {
         if token_provided.denom == config.asset0.denom
-            && token_provided.amount > available_to_add_asset0.amount
+            && token_provided.amount > amount_asset0.checked_sub(assets_pending[0].amount)?
         {
             return Err(ContractError::CannotAddMoreThenAvailableForAsset {
                 asset: config.asset0.denom,
+                amount: amount_asset0
+                    .checked_sub(assets_pending[0].amount)?
+                    .to_string(),
             });
         }
         if token_provided.denom == config.asset1.denom
-            && token_provided.amount > available_to_add_asset1.amount
+            && token_provided.amount > amount_asset1.checked_sub(assets_pending[1].amount)?
         {
             return Err(ContractError::CannotAddMoreThenAvailableForAsset {
                 asset: config.asset1.denom,
+                amount: amount_asset1
+                    .checked_sub(assets_pending[1].amount)?
+                    .to_string(),
             });
         }
     }
 
     Ok(())
-}
-
-fn parse_swap_result(token0: &mut Coin, token1: &mut Coin, swap: Swap) -> StdResult<(Coin, Coin)> {
-    // every route will end in the same denom. we get the final denom from the first route and add the min amount out to the input assets
-    let last_pool = swap
-        .routes
-        .get(0)
-        .and_then(|route| route.pools.last())
-        .unwrap();
-
-    let token_out_min_amount = Uint128::from_str(&swap.token_out_min_amount)?;
-    if last_pool.token_out_denom == token0.denom {
-        token0.amount += token_out_min_amount;
-    } else if last_pool.token_out_denom == token1.denom {
-        token1.amount += token_out_min_amount;
-    }
-
-    // iterate thru the routes and subtract the amounts in from input coins
-    for route in &swap.routes {
-        let token_in_amount = Uint128::from_str(&route.token_in_amount)?;
-        if swap.token_in_denom == token0.denom {
-            token0.amount = token0.amount.checked_sub(token_in_amount)?;
-        } else if swap.token_in_denom == token1.denom {
-            token1.amount = token1.amount.checked_sub(token_in_amount)?;
-        }
-    }
-
-    Ok((token0.clone(), token1.clone()))
 }
