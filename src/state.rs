@@ -63,6 +63,7 @@ pub struct Config {
     pub pool_id: u64,
     pub asset0: VaultAsset,
     pub asset1: VaultAsset,
+    pub min_uptime: Option<u64>,
     pub dollar_cap: Option<Uint128>,
     pub pyth_contract_address: Addr,
     pub price_expiry: u64,

@@ -1,9 +1,7 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Addr, Coin, Decimal, Uint128};
 use cw_ownable::{cw_ownable_execute, cw_ownable_query};
-use osmosis_std_modified::types::osmosis::poolmanager::v1beta1::{
-    SwapAmountInRoute, SwapAmountInSplitRoute,
-};
+use osmosis_std_modified::types::osmosis::poolmanager::v1beta1::SwapAmountInSplitRoute;
 use pyth_sdk_cw::PriceIdentifier;
 
 use crate::state::Config;
@@ -21,7 +19,7 @@ pub struct InstantiateMsg {
     // Seconds after which a price quote is rejected and joins/leaves can't be processed
     pub price_expiry: u64,
     //  Uptime must be enforced to accurately calculate incentives
-    pub min_uptime: u64,
+    pub min_uptime: Option<u64>,
     // CL Assets with their corresponding pyth price feed
     pub asset0: VaultAsset,
     pub asset1: VaultAsset,
@@ -69,6 +67,7 @@ pub enum ExecuteMsg {
         tokens_provided: Vec<Coin>,
         token_min_amount0: String,
         token_min_amount1: String,
+        swap: Option<Swap>,
     },
     // Add to position
     AddToPosition {
@@ -77,25 +76,12 @@ pub enum ExecuteMsg {
         amount1: String,
         token_min_amount0: String,
         token_min_amount1: String,
+        swap: Option<Swap>,
     },
     // Withdraw position
     WithdrawPosition {
         position_id: u64,
         liquidity_amount: String,
-    },
-    // Claim rewards
-    CollectRewards {},
-    // Swap Exact Amount In
-    SwapExactAmountIn {
-        routes: Vec<SwapAmountInRoute>,
-        token_in: Coin,
-        token_out_min_amount: String,
-    },
-    // Split Route Swap Exact Amount In
-    SplitRouteSwapExactAmountIn {
-        routes: Vec<SwapAmountInSplitRoute>,
-        token_in_denom: String,
-        token_out_min_amount: String,
     },
     // Process entries and exits (done internally by the contract every update frequency)
     ProcessNewEntriesAndExits {},
@@ -110,6 +96,13 @@ pub enum ExecuteMsg {
     CloseVault {},
     // Dead man switch
     ForceExits {},
+}
+
+#[cw_serde]
+pub struct Swap {
+    pub routes: Vec<SwapAmountInSplitRoute>,
+    pub token_in_denom: String,
+    pub token_out_min_amount: String,
 }
 
 #[cw_ownable_query]

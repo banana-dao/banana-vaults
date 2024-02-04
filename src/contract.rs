@@ -2,7 +2,7 @@ use std::{collections::HashMap, str::FromStr};
 
 use crate::{
     error::ContractError,
-    msg::{ExecuteMsg, Frequency, InstantiateMsg, MigrateMsg, QueryMsg, TotalAssetsResponse},
+    msg::{ExecuteMsg, Frequency, InstantiateMsg, MigrateMsg, QueryMsg, Swap, TotalAssetsResponse},
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
         CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_EXIT, LAST_UPDATE, VAULT_RATIO,
@@ -18,14 +18,10 @@ use cw2::{get_contract_version, set_contract_version};
 use cw_ownable::{assert_owner, get_ownership, initialize_owner, update_ownership, Action};
 use osmosis_std_modified::types::osmosis::{
     concentratedliquidity::v1beta1::{
-        ConcentratedliquidityQuerier, MsgAddToPosition, MsgCollectIncentives, MsgCreatePosition,
-        Pool, UserPositionsResponse,
+        ConcentratedliquidityQuerier, FullPositionBreakdown, MsgAddToPosition,
+        MsgCollectIncentives, MsgCreatePosition, Pool, UserPositionsResponse,
     },
-    gamm::v1beta1::MsgSwapExactAmountIn,
-    poolmanager::v1beta1::{
-        MsgSplitRouteSwapExactAmountIn, PoolmanagerQuerier, SwapAmountInRoute,
-        SwapAmountInSplitRoute,
-    },
+    poolmanager::v1beta1::{MsgSplitRouteSwapExactAmountIn, PoolmanagerQuerier},
 };
 use osmosis_std_modified::types::{
     cosmos::base::v1beta1::Coin as CosmosCoin,
@@ -100,6 +96,7 @@ pub fn instantiate(
         pool_id: msg.pool_id,
         asset0: msg.asset0,
         asset1: msg.asset1,
+        min_uptime: msg.min_uptime,
         dollar_cap: msg.dollar_cap,
         pyth_contract_address: Addr::unchecked(pyth_contract_address),
         price_expiry: msg.price_expiry,
@@ -167,6 +164,7 @@ pub fn execute(
             tokens_provided,
             token_min_amount0,
             token_min_amount1,
+            swap,
         } => execute_create_position(
             deps,
             env,
@@ -176,6 +174,7 @@ pub fn execute(
             tokens_provided,
             token_min_amount0,
             token_min_amount1,
+            swap,
         ),
         ExecuteMsg::AddToPosition {
             position_id,
@@ -183,6 +182,7 @@ pub fn execute(
             amount1,
             token_min_amount0,
             token_min_amount1,
+            swap,
         } => execute_add_to_position(
             deps,
             env,
@@ -192,29 +192,12 @@ pub fn execute(
             amount1,
             token_min_amount0,
             token_min_amount1,
+            swap,
         ),
         ExecuteMsg::WithdrawPosition {
             position_id,
             liquidity_amount,
         } => execute_withdraw_position(deps, env, info, position_id, liquidity_amount),
-        ExecuteMsg::CollectRewards {} => execute_collect_rewards(deps, env, info),
-        ExecuteMsg::SwapExactAmountIn {
-            routes,
-            token_in,
-            token_out_min_amount,
-        } => execute_swap_exact_amount_in(deps, env, info, routes, token_in, token_out_min_amount),
-        ExecuteMsg::SplitRouteSwapExactAmountIn {
-            routes,
-            token_in_denom,
-            token_out_min_amount,
-        } => execute_split_route_swap_exact_amount_in(
-            deps,
-            env,
-            info,
-            routes,
-            token_in_denom,
-            token_out_min_amount,
-        ),
         ExecuteMsg::ProcessNewEntriesAndExits {} => {
             execute_process_new_entries_and_exits(deps, env, info)
         }
@@ -415,18 +398,33 @@ fn execute_create_position(
     tokens_provided: Vec<Coin>,
     token_min_amount0: String,
     token_min_amount1: String,
+    swap: Option<Swap>,
 ) -> Result<Response, ContractError> {
     assert_owner(deps.storage, &info.sender)?;
     let config = CONFIG.load(deps.storage)?;
 
-    let balance_asset0 = deps.querier.query_balance(
+    let mut messages = vec![];
+    let mut attributes: Vec<Attribute> = vec![];
+
+    let mut balance_asset0 = deps.querier.query_balance(
         env.contract.address.to_owned(),
         config.asset0.denom.to_owned(),
     )?;
-    let balance_asset1 = deps.querier.query_balance(
+    let mut balance_asset1 = deps.querier.query_balance(
         env.contract.address.to_owned(),
         config.asset1.denom.to_owned(),
     )?;
+
+    // execute swap if provided
+    if let Some(swap) = swap {
+        let (message, attribute) =
+            prepare_swap(&deps, env.contract.address.to_string(), swap.clone())?;
+        messages.push(message);
+        attributes.push(attribute);
+
+        (balance_asset0, balance_asset1) =
+            parse_swap_result(&mut balance_asset0, &mut balance_asset1, swap)?;
+    }
 
     verify_availability_of_funds(
         deps.storage,
@@ -435,26 +433,30 @@ fn execute_create_position(
         balance_asset1,
     )?;
 
-    let msg_add_position: CosmosMsg = MsgCreatePosition {
-        pool_id: CONFIG.load(deps.storage)?.pool_id,
-        sender: env.contract.address.to_string(),
-        lower_tick,
-        upper_tick,
-        tokens_provided: tokens_provided
-            .iter()
-            .map(|coin| CosmosCoin {
-                denom: coin.denom.to_string(),
-                amount: coin.amount.to_string(),
-            })
-            .collect(),
-        token_min_amount0,
-        token_min_amount1,
-    }
-    .into();
+    messages.push(
+        MsgCreatePosition {
+            pool_id: config.pool_id,
+            sender: env.contract.address.to_string(),
+            lower_tick,
+            upper_tick,
+            tokens_provided: tokens_provided
+                .iter()
+                .map(|coin| CosmosCoin {
+                    denom: coin.denom.to_string(),
+                    amount: coin.amount.to_string(),
+                })
+                .collect(),
+            token_min_amount0,
+            token_min_amount1,
+        }
+        .into(),
+    );
+
+    attributes.push(attr("action", "banana_vault_create_position"));
 
     Ok(Response::new()
-        .add_message(msg_add_position)
-        .add_attribute("action", "banana_vault_create_position"))
+        .add_messages(messages)
+        .add_attributes(attributes))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -467,18 +469,40 @@ fn execute_add_to_position(
     amount1: String,
     token_min_amount0: String,
     token_min_amount1: String,
+    swap: Option<Swap>,
 ) -> Result<Response, ContractError> {
     assert_owner(deps.storage, &info.sender)?;
     let config = CONFIG.load(deps.storage)?;
 
-    let balance_asset0 = deps.querier.query_balance(
-        env.contract.address.to_owned(),
-        config.asset0.denom.to_owned(),
-    )?;
-    let balance_asset1 = deps.querier.query_balance(
-        env.contract.address.to_owned(),
-        config.asset1.denom.to_owned(),
-    )?;
+    let contract_address = env.contract.address;
+    let mut messages: Vec<CosmosMsg> = vec![];
+    let mut attributes: Vec<Attribute> = vec![];
+
+    let mut balance_asset0 = deps
+        .querier
+        .query_balance(contract_address.clone(), config.asset0.denom.to_owned())?;
+    let mut balance_asset1 = deps
+        .querier
+        .query_balance(contract_address.clone(), config.asset1.denom.to_owned())?;
+
+    // Collect rewards instead of letting them be claimed when adding to position
+    let (reward0, reward1, reward_messages, reward_attributes) =
+        collect_rewards(&deps, contract_address.to_string(), position_id)?;
+
+    balance_asset0.amount += reward0;
+    balance_asset1.amount += reward1;
+    messages.extend(reward_messages);
+    attributes.extend(reward_attributes);
+
+    // execute swap if provided
+    if let Some(swap) = swap {
+        let (message, attribute) = prepare_swap(&deps, contract_address.to_string(), swap.clone())?;
+        messages.push(message);
+        attributes.push(attribute);
+
+        (balance_asset0, balance_asset1) =
+            parse_swap_result(&mut balance_asset0, &mut balance_asset1, swap)?;
+    }
 
     let tokens_provided = vec![
         coin(amount0.parse::<u128>()?, config.asset0.denom.to_owned()),
@@ -492,19 +516,23 @@ fn execute_add_to_position(
         balance_asset1,
     )?;
 
-    let msg_add_to_position: CosmosMsg = MsgAddToPosition {
-        position_id,
-        sender: env.contract.address.to_string(),
-        amount0,
-        amount1,
-        token_min_amount0,
-        token_min_amount1,
-    }
-    .into();
+    messages.push(
+        MsgAddToPosition {
+            position_id,
+            sender: contract_address.to_string(),
+            amount0,
+            amount1,
+            token_min_amount0,
+            token_min_amount1,
+        }
+        .into(),
+    );
+
+    attributes.push(attr("action", "banana_vault_add_to_position"));
 
     Ok(Response::new()
-        .add_message(msg_add_to_position)
-        .add_attribute("action", "banana_vault_add_to_position"))
+        .add_messages(messages)
+        .add_attributes(attributes))
 }
 
 fn execute_withdraw_position(
@@ -516,14 +544,32 @@ fn execute_withdraw_position(
 ) -> Result<Response, ContractError> {
     assert_owner(deps.storage, &info.sender)?;
 
-    let mut response = Response::new();
+    let config = CONFIG.load(deps.storage)?;
+
+    let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
+
+    // if uptime is set, check if enough time has passed to withdraw
+    if let Some(uptime) = config.min_uptime {
+        let join_time: u64 = match cl_querier.position_by_id(position_id)?.position {
+            Some(position) => position.position.unwrap().join_time.unwrap().seconds as u64,
+            None => {
+                return Err(ContractError::NoPositionsOpen {});
+            }
+        };
+
+        if env.block.time.seconds() - join_time < uptime {
+            return Err(ContractError::MinUptime());
+        }
+    }
+
+    let mut messages: Vec<CosmosMsg> = vec![];
+    let mut attributes: Vec<Attribute> = vec![];
 
     // Collect all rewards first to claim commission and distribute the rest
-    response = response.add_message(CosmosMsg::Wasm(WasmMsg::Execute {
-        contract_addr: env.contract.address.to_string(),
-        msg: to_json_binary(&ExecuteMsg::CollectRewards {})?,
-        funds: vec![],
-    }));
+    let (_, _, reward_messages, reward_attributes) =
+        collect_rewards(&deps, env.contract.address.to_string(), position_id)?;
+    messages.extend(reward_messages);
+    attributes.extend(reward_attributes);
 
     let msg_withdraw_position: CosmosMsg = MsgWithdrawPosition {
         position_id,
@@ -532,10 +578,10 @@ fn execute_withdraw_position(
     }
     .into();
 
-    response = response.add_message(msg_withdraw_position);
+    messages.push(msg_withdraw_position);
+    attributes.push(attr("action", "banana_vault_withdraw_position"));
 
     let last_update = LAST_UPDATE.load(deps.storage)?;
-    let config = CONFIG.load(deps.storage)?;
 
     // We will only execute this message if it's time for update (it will execute after the withdraw and check if there are any positions open)
     let update_users_msg = CosmosMsg::Wasm(WasmMsg::Execute {
@@ -549,94 +595,97 @@ fn execute_withdraw_position(
         match config.update_frequency {
             Frequency::Blocks(blocks) => {
                 if env.block.height >= last_update + blocks {
-                    response = response.add_message(update_users_msg)
+                    messages.push(update_users_msg)
                 }
             }
             Frequency::Seconds(seconds) => {
                 if env.block.time.seconds() >= last_update + seconds {
-                    response = response.add_message(update_users_msg)
+                    messages.push(update_users_msg)
                 }
             }
         }
     }
 
-    Ok(response.add_attribute("action", "banana_vault_withdraw_position"))
+    Ok(Response::new()
+        .add_messages(messages)
+        .add_attributes(attributes))
 }
 
-// execute_collect_rewards should be called upon any position change
-fn execute_collect_rewards(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-) -> Result<Response, ContractError> {
-    // If the sender is not the contract, the sender should be the owner
-    if info.sender != env.contract.address {
-        assert_owner(deps.storage, &info.sender)?;
-    }
-
+// collect_rewards should be called upon any position change
+fn collect_rewards(
+    deps: &DepsMut,
+    sender: String,
+    position_id: u64,
+) -> Result<(Uint128, Uint128, Vec<CosmosMsg>, Vec<Attribute>), ContractError> {
     let config = CONFIG.load(deps.storage)?;
 
     let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
-    let user_positions_response: UserPositionsResponse =
-        cl_querier.user_positions(env.contract.address.to_string(), config.pool_id, None)?;
+
+    let position: FullPositionBreakdown = match cl_querier.position_by_id(position_id)?.position {
+        Some(position) => position,
+        None => {
+            return Err(ContractError::NoPositionsOpen {});
+        }
+    };
+
+    let mut reward_coins: Coins = Coins::default();
 
     let mut messages: Vec<CosmosMsg> = vec![];
-
-    if user_positions_response.positions.is_empty() {
-        return Err(ContractError::NoPositionsOpen {});
-    }
-
-    let mut commission_coins: Coins = Coins::default();
-
-    for position in user_positions_response.positions.iter() {
-        let id = position.to_owned().position.unwrap_or_default().position_id;
-        if !position.claimable_incentives.is_empty() {
-            if let Some(commission) = config.commission {
-                for incentive in position.claimable_incentives.iter() {
-                    commission_coins.add(coin(
-                        Uint128::from_str(&incentive.amount)?
-                            .mul_floor(commission)
-                            .u128(),
-                        incentive.denom.to_owned(),
-                    ))?;
-                }
-            };
-
-            messages.push(
-                MsgCollectIncentives {
-                    position_ids: vec![id],
-                    sender: env.contract.address.to_string(),
-                }
-                .into(),
-            );
-        }
-
-        if !position.claimable_spread_rewards.is_empty() {
-            if let Some(commission) = config.commission {
-                for incentive in position.claimable_spread_rewards.iter() {
-                    commission_coins.add(coin(
-                        Uint128::from_str(&incentive.amount)?
-                            .mul_floor(commission)
-                            .u128(),
-                        incentive.denom.to_owned(),
-                    ))?;
-                }
-            };
-
-            messages.push(
-                MsgCollectIncentives {
-                    position_ids: vec![id],
-                    sender: env.contract.address.to_string(),
-                }
-                .into(),
-            );
-        }
-    }
-
     let mut attributes: Vec<Attribute> = vec![];
 
-    if !messages.is_empty() {
+    if !position.claimable_incentives.is_empty() {
+        for incentive in &position.claimable_incentives {
+            reward_coins.add(coin(
+                Uint128::from_str(&incentive.amount)?.u128(),
+                incentive.denom.to_owned(),
+            ))?;
+        }
+        messages.push(
+            MsgCollectIncentives {
+                position_ids: vec![position_id],
+                sender: sender.clone(),
+            }
+            .into(),
+        );
+    }
+
+    if !position.claimable_spread_rewards.is_empty() {
+        for incentive in &position.claimable_spread_rewards {
+            reward_coins.add(coin(
+                Uint128::from_str(&incentive.amount)?.u128(),
+                incentive.denom.to_owned(),
+            ))?;
+        }
+        messages.push(
+            MsgCollectIncentives {
+                position_ids: vec![position_id],
+                sender,
+            }
+            .into(),
+        );
+    }
+
+    if !reward_coins.is_empty() {
         attributes.push(attr("action", "banana_vault_collect_rewards"));
+    }
+
+    let mut amount0 = Uint128::zero();
+    let mut amount1 = Uint128::zero();
+    let mut commission_coins: Coins = Coins::default();
+
+    if let Some(commission) = config.commission {
+        for reward_coin in &reward_coins {
+            let commission_coin = coin(
+                reward_coin.amount.mul_floor(commission).u128(),
+                reward_coin.denom.to_owned(),
+            );
+            commission_coins.add(commission_coin.clone())?;
+            if reward_coin.denom == config.asset0.denom {
+                amount0 = reward_coin.amount.checked_sub(commission_coin.amount)?;
+            } else if reward_coin.denom == config.asset1.denom {
+                amount1 = reward_coin.amount.checked_sub(commission_coin.amount)?;
+            }
+        }
     }
 
     if !commission_coins.is_empty() {
@@ -648,9 +697,7 @@ fn execute_collect_rewards(
         messages.push(send_msg.into());
     }
 
-    Ok(Response::new()
-        .add_messages(messages)
-        .add_attributes(attributes))
+    Ok((amount0, amount1, messages, attributes))
 }
 
 // This can only be done by contract internally
@@ -880,96 +927,24 @@ fn execute_process_new_entries_and_exits(
     Ok(response.add_attribute("action", "banana_vault_process_new_entries_and_exits"))
 }
 
-fn execute_swap_exact_amount_in(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    routes: Vec<SwapAmountInRoute>,
-    token_in: Coin,
-    token_out_min_amount: String,
-) -> Result<Response, ContractError> {
-    assert_owner(deps.storage, &info.sender)?;
-    let config = CONFIG.load(deps.storage)?;
-    let assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
-
-    // We are not allowed to use more than what we have currently available in the vault
-    if token_in.denom == config.asset0.denom {
-        let balance_asset0 = deps.querier.query_balance(
-            env.contract.address.to_owned(),
-            config.asset0.denom.to_owned(),
-        )?;
-
-        let available_to_swap_asset0 = coin(
-            balance_asset0
-                .amount
-                .checked_sub(assets_pending[0].amount)?
-                .u128(),
-            config.asset0.denom.to_owned(),
-        );
-
-        if token_in.amount > available_to_swap_asset0.amount {
-            return Err(ContractError::CannotSwapMoreThanAvailable {});
-        }
-    }
-
-    if token_in.denom == config.asset1.denom {
-        let balance_asset1 = deps.querier.query_balance(
-            env.contract.address.to_owned(),
-            config.asset1.denom.to_owned(),
-        )?;
-
-        let available_to_swap_asset1 = coin(
-            balance_asset1
-                .amount
-                .checked_sub(assets_pending[1].amount)?
-                .u128(),
-            config.asset1.denom.to_owned(),
-        );
-
-        if token_in.amount > available_to_swap_asset1.amount {
-            return Err(ContractError::CannotSwapMoreThanAvailable {});
-        }
-    }
-
-    let msg_swap_exact_amount_in: CosmosMsg = MsgSwapExactAmountIn {
-        sender: env.contract.address.to_string(),
-        routes,
-        token_in: Some(CosmosCoin {
-            denom: token_in.denom,
-            amount: token_in.amount.to_string(),
-        }),
-        token_out_min_amount,
-    }
-    .into();
-
-    Ok(Response::new()
-        .add_message(msg_swap_exact_amount_in)
-        .add_attribute("action", "banana_vault_swap"))
-}
-
-fn execute_split_route_swap_exact_amount_in(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    routes: Vec<SwapAmountInSplitRoute>,
-    token_in_denom: String,
-    token_out_min_amount: String,
-) -> Result<Response, ContractError> {
-    assert_owner(deps.storage, &info.sender)?;
+fn prepare_swap(
+    deps: &DepsMut,
+    sender: String,
+    swap: Swap,
+) -> Result<(CosmosMsg, Attribute), ContractError> {
     let config = CONFIG.load(deps.storage)?;
     let assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
 
     let mut token_in_amount = 0;
-    for route in routes.iter() {
+    for route in &swap.routes {
         token_in_amount += route.token_in_amount.parse::<u128>()?;
     }
 
     // We are not allowed to use more than what we have currently available in the vault
-    if token_in_denom == config.asset0.denom {
-        let balance_asset0 = deps.querier.query_balance(
-            env.contract.address.to_owned(),
-            config.asset0.denom.to_owned(),
-        )?;
+    if swap.token_in_denom == config.asset0.denom {
+        let balance_asset0 = deps
+            .querier
+            .query_balance(sender.clone(), config.asset0.denom.to_owned())?;
 
         let available_to_swap_asset0 = coin(
             balance_asset0
@@ -984,11 +959,10 @@ fn execute_split_route_swap_exact_amount_in(
         }
     }
 
-    if token_in_denom == config.asset1.denom {
-        let balance_asset1 = deps.querier.query_balance(
-            env.contract.address.to_owned(),
-            config.asset1.denom.to_owned(),
-        )?;
+    if swap.token_in_denom == config.asset1.denom {
+        let balance_asset1 = deps
+            .querier
+            .query_balance(sender.clone(), config.asset1.denom.to_owned())?;
 
         let available_to_swap_asset1 = coin(
             balance_asset1
@@ -1004,16 +978,17 @@ fn execute_split_route_swap_exact_amount_in(
     }
 
     let msg_split_route_swap_exact_amount_in: CosmosMsg = MsgSplitRouteSwapExactAmountIn {
-        sender: env.contract.address.to_string(),
-        routes,
-        token_in_denom,
-        token_out_min_amount,
+        sender,
+        routes: swap.routes,
+        token_in_denom: swap.token_in_denom,
+        token_out_min_amount: swap.token_out_min_amount,
     }
     .into();
 
-    Ok(Response::new()
-        .add_message(msg_split_route_swap_exact_amount_in)
-        .add_attribute("action", "banana_vault_split_route_swap"))
+    Ok((
+        msg_split_route_swap_exact_amount_in,
+        attr("action", "banana_vault_swap"),
+    ))
 }
 
 fn execute_halt(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
@@ -1183,29 +1158,37 @@ fn query_total_active_assets(deps: Deps, env: Env) -> StdResult<TotalAssetsRespo
                 .parse::<Uint128>()?,
         )?;
 
-        for coin in &position.claimable_incentives {
-            if coin.denom == config.asset0.denom {
-                balance_asset0.amount = balance_asset0
-                    .amount
-                    .checked_add(coin.amount.parse::<Uint128>()?)?;
-            }
-            if coin.denom == config.asset1.denom {
-                balance_asset1.amount = balance_asset1
-                    .amount
-                    .checked_add(coin.amount.parse::<Uint128>()?)?;
+        let mut reward_coins: Coins = Coins::default();
+
+        if !position.claimable_incentives.is_empty() {
+            for incentive in &position.claimable_incentives {
+                reward_coins.add(coin(
+                    Uint128::from_str(&incentive.amount)?.u128(),
+                    incentive.denom.to_owned(),
+                ))?;
             }
         }
 
-        for coin in &position.claimable_spread_rewards {
-            if coin.denom == config.asset0.denom {
-                balance_asset0.amount = balance_asset0
-                    .amount
-                    .checked_add(coin.amount.parse::<Uint128>()?)?;
+        if !position.claimable_spread_rewards.is_empty() {
+            for incentive in &position.claimable_spread_rewards {
+                reward_coins.add(coin(
+                    Uint128::from_str(&incentive.amount)?.u128(),
+                    incentive.denom.to_owned(),
+                ))?;
             }
-            if coin.denom == config.asset1.denom {
-                balance_asset1.amount = balance_asset1
-                    .amount
-                    .checked_add(coin.amount.parse::<Uint128>()?)?;
+        }
+
+        if let Some(commission) = config.commission {
+            for reward_coin in &reward_coins {
+                if reward_coin.denom == config.asset0.denom {
+                    balance_asset0.amount += reward_coin
+                        .amount
+                        .checked_sub(reward_coin.amount.mul_floor(commission))?;
+                } else if reward_coin.denom == config.asset1.denom {
+                    balance_asset1.amount += reward_coin
+                        .amount
+                        .checked_sub(reward_coin.amount.mul_floor(commission))?;
+                }
             }
         }
     }
@@ -1369,4 +1352,32 @@ fn verify_availability_of_funds(
     }
 
     Ok(())
+}
+
+fn parse_swap_result(token0: &mut Coin, token1: &mut Coin, swap: Swap) -> StdResult<(Coin, Coin)> {
+    // every route will end in the same denom. we get the final denom from the first route and add the min amount out to the input assets
+    let last_pool = swap
+        .routes
+        .get(0)
+        .and_then(|route| route.pools.last())
+        .unwrap();
+
+    let token_out_min_amount = Uint128::from_str(&swap.token_out_min_amount)?;
+    if last_pool.token_out_denom == token0.denom {
+        token0.amount += token_out_min_amount;
+    } else if last_pool.token_out_denom == token1.denom {
+        token1.amount += token_out_min_amount;
+    }
+
+    // iterate thru the routes and subtract the amounts in from input coins
+    for route in &swap.routes {
+        let token_in_amount = Uint128::from_str(&route.token_in_amount)?;
+        if swap.token_in_denom == token0.denom {
+            token0.amount = token0.amount.checked_sub(token_in_amount)?;
+        } else if swap.token_in_denom == token1.denom {
+            token1.amount = token1.amount.checked_sub(token_in_amount)?;
+        }
+    }
+
+    Ok((token0.clone(), token1.clone()))
 }

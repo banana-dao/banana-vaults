@@ -71,4 +71,7 @@ pub enum ContractError {
 
     #[error("Pyth price quote is older than {} seconds, please update", seconds)]
     StalePrice { seconds: u64 },
+
+    #[error("Can't remove position, age is less than min uptime.")]
+    MinUptime(),
 }
