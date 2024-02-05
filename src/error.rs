@@ -42,8 +42,8 @@ pub enum ContractError {
     #[error("The pool id cannot change")]
     CannotChangePoolId {},
 
-    #[error("Trying to add more than available of {} to position", asset)]
-    CannotAddMoreThenAvailableForAsset { asset: String },
+    #[error("Trying to add more than available {}{} to position.", amount, asset)]
+    CannotAddMoreThanAvailableForAsset { asset: String, amount: String },
 
     #[error("Operation unauthorized - only contract can call this function")]
     Unauthorized {},
@@ -62,4 +62,19 @@ pub enum ContractError {
 
     #[error("Cant force exits yet. Still {} seconds remaining", seconds)]
     CantForceExitsYet { seconds: u64 },
+
+    #[error("No position found")]
+    NoPositionsOpen {},
+
+    #[error("Amount of {} provided is below minimum", denom)]
+    DepositBelowMinimum { denom: String },
+
+    #[error("Pyth price quote is older than {} seconds, please update", seconds)]
+    StalePrice { seconds: u64 },
+
+    #[error("Can't remove position, age is less than min uptime.")]
+    MinUptime(),
+
+    #[error("Maximum number of positions reached.")]
+    MaxPositionsReached(),
 }
