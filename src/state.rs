@@ -1,8 +1,8 @@
+use crate::msg::{Frequency, VaultAsset};
 use cosmwasm_schema::cw_serde;
+use cosmwasm_std::Empty;
 use cosmwasm_std::{Addr, Coin, Decimal, Uint128};
 use cw_storage_plus::{Item, Map};
-
-use crate::msg::{Frequency, VaultAsset};
 
 /// Top level storage key. Values must not conflict.
 /// Each key is only one byte long to ensure we use the smallest possible storage keys.
@@ -19,6 +19,7 @@ pub enum TopKey {
     CapReached = b'l',
     VaultTerminated = b'm',
     LastExit = b'n',
+    WhitelistedDepositors = b'o',
 }
 
 impl TopKey {
@@ -54,6 +55,8 @@ pub const HALT_EXITS_AND_JOINS: Item<bool> = Item::new(TopKey::HaltExitsAndJoins
 pub const CAP_REACHED: Item<bool> = Item::new(TopKey::CapReached.as_str());
 // Flag to indicate that the vault has been terminated by owner
 pub const VAULT_TERMINATED: Item<bool> = Item::new(TopKey::VaultTerminated.as_str());
+pub const WHITELISTED_DEPOSITORS: Map<Addr, Empty> =
+    Map::new(TopKey::WhitelistedDepositors.as_str());
 
 #[cw_serde]
 pub struct Config {
@@ -70,5 +73,4 @@ pub struct Config {
     pub update_frequency: Frequency,
     pub commission: Option<Decimal>,
     pub commission_receiver: Addr,
-    pub whitelisted_depositors: Option<Vec<Addr>>,
 }

@@ -1,14 +1,13 @@
-use std::{collections::HashMap, str::FromStr};
-
 use crate::{
     error::ContractError,
     msg::{ExecuteMsg, Frequency, InstantiateMsg, MigrateMsg, QueryMsg, Swap, TotalAssetsResponse},
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
         CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_EXIT, LAST_UPDATE, VAULT_RATIO,
-        VAULT_TERMINATED,
+        VAULT_TERMINATED, WHITELISTED_DEPOSITORS,
     },
 };
+use cosmwasm_std::Empty;
 use cosmwasm_std::{
     attr, coin, entry_point, to_json_binary, Addr, Attribute, BankMsg, Binary, Coin, Coins,
     CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Order, Response, StdError, StdResult,
@@ -29,6 +28,7 @@ use osmosis_std_modified::types::{
     osmosis::concentratedliquidity::v1beta1::MsgWithdrawPosition,
 };
 use pyth_sdk_cw::query_price_feed;
+use std::{collections::HashMap, str::FromStr};
 
 // version info for migration info
 const CONTRACT_NAME: &str = env!("CARGO_PKG_NAME");
@@ -83,13 +83,6 @@ pub fn instantiate(
         PYTH_TESTNET_CONTRACT_ADDRESS
     };
 
-    // Validate that valid addresses were sent just in case
-    if let Some(whitelisted_depositors) = msg.whitelisted_depositors.to_owned() {
-        for address in whitelisted_depositors.iter() {
-            deps.api.addr_validate(address.as_str())?;
-        }
-    };
-
     let config = Config {
         name: msg.name,
         description: msg.description,
@@ -104,7 +97,6 @@ pub fn instantiate(
         update_frequency: msg.update_frequency.to_owned(),
         commission: msg.commission,
         commission_receiver: msg.commission_receiver.unwrap_or(info.sender.to_owned()),
-        whitelisted_depositors: msg.whitelisted_depositors,
     };
 
     // Check that the assets in the pool are the same assets we sent in the instantiate message
@@ -157,8 +149,9 @@ pub fn execute(
     match msg {
         ExecuteMsg::UpdateOwnership(action) => execute_update_ownership(deps, env, info, action),
         ExecuteMsg::ModifyConfig { config } => execute_modify_config(deps, env, info, *config),
+        ExecuteMsg::Whitelist { add, remove } => execute_whitelist(deps, info, add, remove),
         ExecuteMsg::Join {} => execute_join(deps, info),
-        ExecuteMsg::Leave {} => execute_leave(deps, info),
+        ExecuteMsg::Leave { address } => execute_leave(deps, info, address),
         ExecuteMsg::CreatePosition {
             lower_tick,
             upper_tick,
@@ -239,13 +232,6 @@ fn execute_modify_config(
         return Err(ContractError::CannotChangePoolId {});
     }
 
-    // Validate that valid addresses were sent just in case
-    if let Some(whitelisted_depositors) = new_config.whitelisted_depositors.to_owned() {
-        for address in whitelisted_depositors.iter() {
-            deps.api.addr_validate(address.as_str())?;
-        }
-    };
-
     CONFIG.save(deps.storage, &new_config)?;
 
     // If we modify config we are going to reset the timer for update (so we allow changing from blocks to seconds and viceversa)
@@ -263,6 +249,48 @@ fn execute_modify_config(
         .add_attribute("new_pyth_address", new_config.pyth_contract_address))
 }
 
+fn execute_whitelist(
+    deps: DepsMut,
+    info: MessageInfo,
+    add: Vec<Addr>,
+    remove: Vec<Addr>,
+) -> Result<Response, ContractError> {
+    assert_owner(deps.storage, &info.sender)?;
+    let mut attributes: Vec<Attribute> = vec![];
+    for address in add {
+        match WHITELISTED_DEPOSITORS.may_load(deps.storage, info.sender.to_owned())? {
+            Some(_) => {
+                return Err(ContractError::AddressInWhitelist {
+                    address: address.to_string(),
+                });
+            }
+            None => {
+                deps.api.addr_validate(address.as_str())?;
+                WHITELISTED_DEPOSITORS.save(deps.storage, info.sender.to_owned(), &Empty {})?;
+                attributes.push(attr("action", "banana_vault_whitelist_add"));
+                attributes.push(attr("address", address))
+            }
+        }
+    }
+
+    for address in remove {
+        match WHITELISTED_DEPOSITORS.may_load(deps.storage, info.sender.to_owned())? {
+            Some(_) => {
+                WHITELISTED_DEPOSITORS.remove(deps.storage, info.sender.to_owned());
+                attributes.push(attr("action", "banana_vault_whitelist_remove"));
+                attributes.push(attr("address", address))
+            }
+            None => {
+                return Err(ContractError::AddressNotInWhitelist {
+                    address: address.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(Response::new().add_attributes(attributes))
+}
+
 fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     verify_funds(&info, &config)?;
@@ -278,16 +306,13 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
         return Err(ContractError::VaultHalted {});
     }
 
-    // Check if vault cap has been reached
-    if CAP_REACHED.load(deps.storage)? {
-        // Check if user is whitelisted to exceed cap
-        if !config
-            .whitelisted_depositors
-            .unwrap_or_default()
-            .contains(&info.sender)
-        {
-            return Err(ContractError::CapReached {});
-        }
+    // Check if vault cap has been reached and user is not whitelisted to exceed it
+    if CAP_REACHED.load(deps.storage)?
+        && WHITELISTED_DEPOSITORS
+            .may_load(deps.storage, info.sender.to_owned())?
+            .is_none()
+    {
+        return Err(ContractError::CapReached {});
     }
 
     // We queue up the assets for the next iteration
@@ -339,14 +364,34 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
         }
     }
 
-    Ok(Response::new()
-        .add_attribute("action", "banana_vault_join")
-        .add_attribute("address", info.sender))
+    Ok(Response::new().add_attribute("action", "banana_vault_join"))
 }
 
-fn execute_leave(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
-    // If user wants to leave, we return any pending joining assets and add him in the list for leaving the vault if he has active assets in it
-    let mut response = Response::new();
+fn execute_leave(
+    deps: DepsMut,
+    info: MessageInfo,
+    address: Option<Addr>,
+) -> Result<Response, ContractError> {
+    let mut attributes: Vec<Attribute> = vec![attr("action", "banana_vault_leave")];
+
+    let leave_address = match address {
+        Some(address) => {
+            match assert_owner(deps.storage, &info.sender) {
+                Ok(_) => (),
+                Err(_) => {
+                    return Err(ContractError::CannotForceExit {});
+                }
+            }
+            attributes.push(attr("action", "banana_vault_force_exit"));
+            address
+        }
+        None => info.sender,
+    };
+
+    attributes.push(attr("address", leave_address.to_owned()));
+
+    // If a user is leaving, we return any pending joining assets and add him in the list for leaving the vault if he has active assets in it
+    let mut response = Response::new().add_attributes(attributes);
 
     // Check if vault is not halted for security reasons
     if HALT_EXITS_AND_JOINS.load(deps.storage)? {
@@ -354,7 +399,7 @@ fn execute_leave(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractE
     }
 
     if let Some(mut funds) =
-        ACCOUNTS_PENDING_ACTIVATION.may_load(deps.storage, info.sender.to_owned())?
+        ACCOUNTS_PENDING_ACTIVATION.may_load(deps.storage, leave_address.to_owned())?
     {
         // We return the pending joining assets
         let mut assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
@@ -362,31 +407,29 @@ fn execute_leave(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractE
         assets_pending[1].amount -= funds[1].amount;
         ASSETS_PENDING_ACTIVATION.save(deps.storage, &assets_pending)?;
 
-        ACCOUNTS_PENDING_ACTIVATION.remove(deps.storage, info.sender.to_owned());
+        ACCOUNTS_PENDING_ACTIVATION.remove(deps.storage, leave_address.to_owned());
 
         // Remove empty amounts to avoid sending empty funds in bank msg
         funds.retain(|f| f.amount.ne(&Uint128::zero()));
 
         let send_msg = BankMsg::Send {
-            to_address: info.sender.to_string(),
+            to_address: leave_address.to_string(),
             amount: funds,
         };
 
         response = response.add_message(send_msg);
     }
 
-    if VAULT_RATIO.has(deps.storage, info.sender.to_owned()) {
+    if VAULT_RATIO.has(deps.storage, leave_address.to_owned()) {
         // We add the user to the list of addresses waiting to leave the vault
         let mut addresses_waiting_for_exit = ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)?;
-        if !addresses_waiting_for_exit.contains(&info.sender) {
-            addresses_waiting_for_exit.push(info.sender.to_owned());
+        if !addresses_waiting_for_exit.contains(&leave_address) {
+            addresses_waiting_for_exit.push(leave_address);
             ADDRESSES_WAITING_FOR_EXIT.save(deps.storage, &addresses_waiting_for_exit)?;
         }
     }
 
-    Ok(response
-        .add_attribute("action", "banana_vault_leave")
-        .add_attribute("sender", info.sender))
+    Ok(response)
 }
 
 #[allow(clippy::too_many_arguments)]
