@@ -43,7 +43,7 @@ pub enum ContractError {
     CannotChangePoolId {},
 
     #[error("Trying to add more than available {}{} to position.", amount, asset)]
-    CannotAddMoreThenAvailableForAsset { asset: String, amount: String },
+    CannotAddMoreThanAvailableForAsset { asset: String, amount: String },
 
     #[error("Operation unauthorized - only contract can call this function")]
     Unauthorized {},

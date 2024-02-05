@@ -19,7 +19,8 @@ use cw_ownable::{assert_owner, get_ownership, initialize_owner, update_ownership
 use osmosis_std_modified::types::osmosis::{
     concentratedliquidity::v1beta1::{
         ConcentratedliquidityQuerier, FullPositionBreakdown, MsgAddToPosition,
-        MsgCollectIncentives, MsgCreatePosition, Pool, UserPositionsResponse,
+        MsgCollectIncentives, MsgCollectSpreadRewards, MsgCreatePosition, Pool,
+        UserPositionsResponse,
     },
     poolmanager::v1beta1::{MsgSplitRouteSwapExactAmountIn, PoolmanagerQuerier},
 };
@@ -671,7 +672,7 @@ fn collect_rewards(
             ))?;
         }
         messages.push(
-            MsgCollectIncentives {
+            MsgCollectSpreadRewards {
                 position_ids: vec![position_id],
                 sender,
             }
@@ -1329,7 +1330,7 @@ fn verify_availability_of_funds(
         if token_provided.denom == config.asset0.denom
             && token_provided.amount > amount_asset0.checked_sub(assets_pending[0].amount)?
         {
-            return Err(ContractError::CannotAddMoreThenAvailableForAsset {
+            return Err(ContractError::CannotAddMoreThanAvailableForAsset {
                 asset: config.asset0.denom,
                 amount: amount_asset0
                     .checked_sub(assets_pending[0].amount)?
@@ -1339,7 +1340,7 @@ fn verify_availability_of_funds(
         if token_provided.denom == config.asset1.denom
             && token_provided.amount > amount_asset1.checked_sub(assets_pending[1].amount)?
         {
-            return Err(ContractError::CannotAddMoreThenAvailableForAsset {
+            return Err(ContractError::CannotAddMoreThanAvailableForAsset {
                 asset: config.asset1.denom,
                 amount: amount_asset1
                     .checked_sub(assets_pending[1].amount)?
