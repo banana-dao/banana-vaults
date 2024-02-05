@@ -130,12 +130,22 @@ pub enum QueryMsg {
     // How much of the vault this address owns
     #[returns(Decimal)]
     VaultRatio { address: Addr },
+    #[returns(WhitelistedDepositorsResponse)]
+    WhitelistedDepositors {
+        start_after: Option<Addr>,
+        limit: Option<u32>,
+    },
 }
 
 #[cw_serde]
 pub struct TotalAssetsResponse {
     pub asset0: Coin,
     pub asset1: Coin,
+}
+
+#[cw_serde]
+pub struct WhitelistedDepositorsResponse {
+    pub whitelisted_depositors: Vec<Addr>,
 }
 
 #[cw_serde]
