@@ -72,9 +72,18 @@ pub enum ContractError {
     #[error("Pyth price quote is older than {} seconds, please update", seconds)]
     StalePrice { seconds: u64 },
 
-    #[error("Can't remove position, age is less than min uptime.")]
+    #[error("Can't remove position, age is less than min uptime")]
     MinUptime(),
 
-    #[error("Maximum number of positions reached.")]
+    #[error("Maximum number of positions reached")]
     MaxPositionsReached(),
+
+    #[error("Address {} already whitelisted", address)]
+    AddressInWhitelist { address: String },
+
+    #[error("Address {} not whitelisted, cannot remove", address)]
+    AddressNotInWhitelist { address: String },
+
+    #[error("You can't make someone else exit")]
+    CannotForceExit {},
 }

@@ -28,8 +28,6 @@ pub struct InstantiateMsg {
     pub commission: Option<Decimal>,
     // If no address specified, contract admin will be receiver of commissions
     pub commission_receiver: Option<Addr>,
-    // Addresses allowed to exceed the deposit cap
-    pub whitelisted_depositors: Option<Vec<Addr>>,
     // Flag to take the right pyth contract address - true for mainnet, false for testnet
     pub mainnet: bool,
     // Vault operator address
@@ -60,6 +58,11 @@ pub enum ExecuteMsg {
     ModifyConfig {
         config: Box<Config>,
     },
+    // Manage addresses whitelisted to exceed deposit limits
+    Whitelist {
+        add: Vec<Addr>,
+        remove: Vec<Addr>,
+    },
     // Create position
     CreatePosition {
         lower_tick: i64,
@@ -87,8 +90,10 @@ pub enum ExecuteMsg {
     ProcessNewEntriesAndExits {},
     // Join vault
     Join {},
-    // Leave vault,
-    Leave {},
+    // Leave vault. If no address is specified, the sender will be removed. only the operator can remove other addresses
+    Leave {
+        address: Option<Addr>,
+    },
     // Halt and Resume for Admin
     Halt {},
     Resume {},
@@ -125,12 +130,22 @@ pub enum QueryMsg {
     // How much of the vault this address owns
     #[returns(Decimal)]
     VaultRatio { address: Addr },
+    #[returns(WhitelistedDepositorsResponse)]
+    WhitelistedDepositors {
+        start_after: Option<Addr>,
+        limit: Option<u32>,
+    },
 }
 
 #[cw_serde]
 pub struct TotalAssetsResponse {
     pub asset0: Coin,
     pub asset1: Coin,
+}
+
+#[cw_serde]
+pub struct WhitelistedDepositorsResponse {
+    pub whitelisted_depositors: Vec<Addr>,
 }
 
 #[cw_serde]
