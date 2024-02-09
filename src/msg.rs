@@ -14,8 +14,10 @@ pub struct InstantiateMsg {
     pub image: Option<String>,
     // Must be a CL pool
     pub pool_id: u64,
-    // Update users frequency (adding users that want to join and removing users that want to leave)
-    pub update_frequency: Frequency,
+    // Update users frequency (adding users that want to join and removing users that want to leave), in seconds
+    pub min_update_frequency: Option<u64>,
+    // Interval after which ForceExits can be called, in seconds
+    pub max_update_frequency: Option<u64>,
     // Seconds after which a price quote is rejected and joins/leaves can't be processed
     pub price_expiry: u64,
     //  Uptime must be enforced to accurately calculate commission
@@ -32,12 +34,6 @@ pub struct InstantiateMsg {
     pub mainnet: bool,
     // Vault operator address
     pub operator: Addr,
-}
-
-#[cw_serde]
-pub enum Frequency {
-    Blocks(u64),
-    Seconds(u64),
 }
 
 #[cw_serde]
@@ -122,6 +118,9 @@ pub enum QueryMsg {
     // Tells you how much is pending join in total
     #[returns(TotalAssetsResponse)]
     TotalPendingAssets {},
+    // Checks if the contract can process new entries and exits
+    #[returns(bool)]
+    CanUpdate {},
     // Tells you how much of each vault asset is pending to join for an address
     #[returns(Vec<Coin>)]
     PendingJoin { address: Addr },

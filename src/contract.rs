@@ -1,13 +1,13 @@
 use crate::{
     error::ContractError,
     msg::{
-        ExecuteMsg, Frequency, InstantiateMsg, MigrateMsg, QueryMsg, Swap, TotalAssetsResponse,
+        ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg, Swap, TotalAssetsResponse,
         WhitelistedDepositorsResponse,
     },
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
-        CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_EXIT, LAST_UPDATE, VAULT_RATIO,
-        VAULT_TERMINATED, WHITELISTED_DEPOSITORS,
+        CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_UPDATE, VAULT_RATIO, VAULT_TERMINATED,
+        WHITELISTED_DEPOSITORS,
     },
 };
 use cosmwasm_std::Empty;
@@ -43,9 +43,9 @@ const PYTH_TESTNET_CONTRACT_ADDRESS: &str =
 const PYTH_MAINNET_CONTRACT_ADDRESS: &str =
     "osmo13ge29x4e2s63a8ytz2px8gurtyznmue4a69n5275692v3qn3ks8q7cwck7";
 
-// Used for the dead man switch. If admin didn't allow withdrawals for this amount of time, anyone can trigger the switch and all positions will be closed
-// And people trying to leave will be able to leave
-const MAX_NO_EXIT_PERIOD: u64 = 86400 * 14; // 14 days
+// Sensible defaults for update frequency
+const DEFAULT_MIN_UPDATE_FREQUENCY: u64 = 600; // 10 minutes
+const DEFAULT_MAX_UPDATE_FREQUENCY: u64 = 86400 * 14; // 14 days
 
 // Pagination
 const MAX_PAGE_LIMIT: u32 = 250;
@@ -101,7 +101,12 @@ pub fn instantiate(
         dollar_cap: msg.dollar_cap,
         pyth_contract_address: Addr::unchecked(pyth_contract_address),
         price_expiry: msg.price_expiry,
-        update_frequency: msg.update_frequency.to_owned(),
+        min_update_frequency: msg
+            .min_update_frequency
+            .unwrap_or(DEFAULT_MIN_UPDATE_FREQUENCY),
+        max_update_frequency: msg
+            .max_update_frequency
+            .unwrap_or(DEFAULT_MAX_UPDATE_FREQUENCY),
         commission: msg.commission,
         commission_receiver: msg.commission_receiver.unwrap_or(info.sender.to_owned()),
     };
@@ -124,26 +129,19 @@ pub fn instantiate(
 
     // At the beginning, the instantiator owns 100% of the vault
     VAULT_RATIO.save(deps.storage, info.sender.to_owned(), &Decimal::one())?;
-    // Set current block time/height as last update
-    match msg.update_frequency {
-        Frequency::Blocks(_) => {
-            LAST_UPDATE.save(deps.storage, &env.block.height)?;
-        }
-        Frequency::Seconds(_) => {
-            LAST_UPDATE.save(deps.storage, &env.block.time.seconds())?;
-        }
-    }
+
+    // Set current block time as last update
+    LAST_UPDATE.save(deps.storage, &env.block.time.seconds())?;
 
     CAP_REACHED.save(deps.storage, &false)?;
     HALT_EXITS_AND_JOINS.save(deps.storage, &false)?;
     VAULT_TERMINATED.save(deps.storage, &false)?;
-    LAST_EXIT.save(deps.storage, &env.block.time.seconds())?;
 
     Ok(Response::new()
         .add_attribute("action", "banana_vault_instantiate")
         .add_attribute("contract_name", CONTRACT_NAME)
         .add_attribute("contract_version", CONTRACT_VERSION)
-        .add_attribute("owner", info.sender))
+        .add_attribute("operator", msg.operator))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -155,7 +153,7 @@ pub fn execute(
 ) -> Result<Response, ContractError> {
     match msg {
         ExecuteMsg::UpdateOwnership(action) => execute_update_ownership(deps, env, info, action),
-        ExecuteMsg::ModifyConfig { config } => execute_modify_config(deps, env, info, *config),
+        ExecuteMsg::ModifyConfig { config } => execute_modify_config(deps, info, *config),
         ExecuteMsg::Whitelist { add, remove } => execute_whitelist(deps, info, add, remove),
         ExecuteMsg::Join {} => execute_join(deps, info),
         ExecuteMsg::Leave { address } => execute_leave(deps, info, address),
@@ -221,7 +219,6 @@ fn execute_update_ownership(
 
 fn execute_modify_config(
     deps: DepsMut,
-    env: Env,
     info: MessageInfo,
     new_config: Config,
 ) -> Result<Response, ContractError> {
@@ -240,16 +237,6 @@ fn execute_modify_config(
     }
 
     CONFIG.save(deps.storage, &new_config)?;
-
-    // If we modify config we are going to reset the timer for update (so we allow changing from blocks to seconds and viceversa)
-    match new_config.update_frequency {
-        Frequency::Blocks(_) => {
-            LAST_UPDATE.save(deps.storage, &env.block.height)?;
-        }
-        Frequency::Seconds(_) => {
-            LAST_UPDATE.save(deps.storage, &env.block.time.seconds())?;
-        }
-    }
 
     Ok(Response::new()
         .add_attribute("action", "banana_vault_modify_config")
@@ -648,19 +635,10 @@ fn execute_withdraw_position(
     });
 
     // We can only update if it's time for update and if vault is not halted
-    if !HALT_EXITS_AND_JOINS.load(deps.storage)? {
-        match config.update_frequency {
-            Frequency::Blocks(blocks) => {
-                if env.block.height >= last_update + blocks {
-                    messages.push(update_users_msg)
-                }
-            }
-            Frequency::Seconds(seconds) => {
-                if env.block.time.seconds() >= last_update + seconds {
-                    messages.push(update_users_msg)
-                }
-            }
-        }
+    if !HALT_EXITS_AND_JOINS.load(deps.storage)?
+        && env.block.time.seconds() >= last_update + config.min_update_frequency
+    {
+        messages.push(update_users_msg)
     }
 
     Ok(Response::new()
@@ -956,17 +934,8 @@ fn execute_process_new_entries_and_exits(
             &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
         )?;
 
-        // Save last update to current block time/height
-        match config.update_frequency {
-            Frequency::Blocks(_) => {
-                LAST_UPDATE.save(deps.storage, &env.block.height)?;
-            }
-            Frequency::Seconds(_) => {
-                LAST_UPDATE.save(deps.storage, &env.block.time.seconds())?;
-            }
-        }
-
-        LAST_EXIT.save(deps.storage, &env.block.time.seconds())?;
+        // Save last update to current block time
+        LAST_UPDATE.save(deps.storage, &env.block.time.seconds())?;
 
         // Check that we are not over the vault cap, if that's the case, we will flag it to halt joins until under cap again
         if let Some(dollar_cap) = config.dollar_cap {
@@ -1107,16 +1076,16 @@ fn execute_close_vault(deps: DepsMut, info: MessageInfo) -> Result<Response, Con
 }
 
 fn execute_force_exits(deps: DepsMut, env: Env) -> Result<Response, ContractError> {
-    let last_exit = LAST_EXIT.load(deps.storage)?;
+    let last_update = LAST_UPDATE.load(deps.storage)?;
+    let config = CONFIG.load(deps.storage)?;
 
-    if last_exit.checked_add(MAX_NO_EXIT_PERIOD).unwrap() < env.block.time.seconds() {
+    if env.block.time.seconds() < last_update + config.max_update_frequency {
         return Err(ContractError::CantForceExitsYet {
-            seconds: env.block.time.seconds() - last_exit.checked_add(MAX_NO_EXIT_PERIOD).unwrap(),
+            seconds: last_update + config.max_update_frequency - env.block.time.seconds(),
         });
     }
 
     let mut messages = vec![];
-    let config = CONFIG.load(deps.storage)?;
     let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
     let user_positions_response: UserPositionsResponse =
         cl_querier.user_positions(env.contract.address.to_string(), config.pool_id, None)?;
@@ -1152,6 +1121,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::Ownership {} => to_json_binary(&get_ownership(deps.storage)?),
         QueryMsg::TotalActiveAssets {} => to_json_binary(&query_total_active_assets(deps, env)?),
         QueryMsg::TotalPendingAssets {} => to_json_binary(&query_total_pending_assets(deps)?),
+        QueryMsg::CanUpdate {} => to_json_binary(&query_can_update(deps, env)?),
         QueryMsg::PendingJoin { address } => to_json_binary(&query_pending_join(deps, address)?),
         QueryMsg::AccountsPendingExit {} => to_json_binary(&query_pending_exit(deps)?),
         QueryMsg::VaultRatio { address } => to_json_binary(&query_vault_ratio(deps, address)?),
@@ -1275,6 +1245,11 @@ fn query_total_pending_assets(deps: Deps) -> StdResult<TotalAssetsResponse> {
     }
 
     Ok(TotalAssetsResponse { asset0, asset1 })
+}
+
+fn query_can_update(deps: Deps, env: Env) -> StdResult<bool> {
+    Ok(env.block.time.seconds()
+        >= LAST_UPDATE.load(deps.storage)? + CONFIG.load(deps.storage)?.min_update_frequency)
 }
 
 fn query_pending_join(deps: Deps, address: Addr) -> StdResult<Vec<Coin>> {

@@ -1,4 +1,4 @@
-use crate::msg::{Frequency, VaultAsset};
+use crate::msg::VaultAsset;
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::Empty;
 use cosmwasm_std::{Addr, Coin, Decimal, Uint128};
@@ -18,8 +18,7 @@ pub enum TopKey {
     HaltExitsAndJoins = b'k',
     CapReached = b'l',
     VaultTerminated = b'm',
-    LastExit = b'n',
-    WhitelistedDepositors = b'o',
+    WhitelistedDepositors = b'n',
 }
 
 impl TopKey {
@@ -38,8 +37,6 @@ pub const CONFIG: Item<Config> = Item::new(TopKey::Config.as_str());
 pub const VAULT_RATIO: Map<Addr, Decimal> = Map::new(TopKey::VaultRatio.as_str());
 // Last time the vault was updated (block height / time)
 pub const LAST_UPDATE: Item<u64> = Item::new(TopKey::LastUpdate.as_str());
-// Last time exits were allowed (block time)
-pub const LAST_EXIT: Item<u64> = Item::new(TopKey::LastExit.as_str());
 // Assets waiting to join the vault
 pub const ASSETS_PENDING_ACTIVATION: Item<Vec<Coin>> =
     Item::new(TopKey::AssetPendingActivation.as_str());
@@ -70,7 +67,8 @@ pub struct Config {
     pub dollar_cap: Option<Uint128>,
     pub pyth_contract_address: Addr,
     pub price_expiry: u64,
-    pub update_frequency: Frequency,
+    pub min_update_frequency: u64,
+    pub max_update_frequency: u64,
     pub commission: Option<Decimal>,
     pub commission_receiver: Addr,
 }
