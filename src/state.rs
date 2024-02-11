@@ -8,17 +8,17 @@ use cw_storage_plus::{Item, Map};
 /// Each key is only one byte long to ensure we use the smallest possible storage keys.
 #[repr(u8)]
 pub enum TopKey {
-    Config = b'd',
-    VaultRatio = b'e',
-    LastUpdate = b'f',
-    AssetPendingActivation = b'g',
-    AccountsPendingActivation = b'h',
-    CurrentPositions = b'i',
-    AddressesWaitingForExit = b'j',
-    HaltExitsAndJoins = b'k',
-    CapReached = b'l',
-    VaultTerminated = b'm',
-    WhitelistedDepositors = b'n',
+    Config = b'a',
+    VaultRatio = b'b',
+    LastUpdate = b'c',
+    AssetPendingActivation = b'd',
+    AccountsPendingActivation = b'e',
+    NonVaultRewards = b'f',
+    AddressesWaitingForExit = b'g',
+    HaltExitsAndJoins = b'h',
+    CapReached = b'i',
+    VaultTerminated = b'j',
+    WhitelistedDepositors = b'k',
 }
 
 impl TopKey {
@@ -43,6 +43,8 @@ pub const ASSETS_PENDING_ACTIVATION: Item<Vec<Coin>> =
 // Accounts pending activation and how much for each one
 pub const ACCOUNTS_PENDING_ACTIVATION: Map<Addr, Vec<Coin>> =
     Map::new(TopKey::AccountsPendingActivation.as_str());
+// collected rewards that are not asset0 or asset1
+pub const NON_VAULT_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::NonVaultRewards.as_str());
 // Addresses pending to leave the vault
 pub const ADDRESSES_WAITING_FOR_EXIT: Item<Vec<Addr>> =
     Item::new(TopKey::AddressesWaitingForExit.as_str());

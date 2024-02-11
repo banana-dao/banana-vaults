@@ -30,8 +30,8 @@ pub struct InstantiateMsg {
     pub commission: Option<Decimal>,
     // If no address specified, contract admin will be receiver of commissions
     pub commission_receiver: Option<Addr>,
-    // Flag to take the right pyth contract address - true for mainnet, false for testnet
-    pub mainnet: bool,
+    // Flag to take the right pyth contract address - defaults to mainnet
+    pub mainnet: Option<bool>,
     // Vault operator address
     pub operator: Addr,
 }
