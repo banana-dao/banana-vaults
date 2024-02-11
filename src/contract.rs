@@ -807,7 +807,7 @@ fn execute_process_new_entries_and_exits(
             let mut amounts_send_msg: Vec<Coin> = vec![];
 
             // get the non vault rewards for each address and prepare to send
-            let non_vault_rewards: Vec<Coin> = non_vault_rewards
+            let rewards: Vec<Coin> = non_vault_rewards
                 .iter()
                 .map(|c| {
                     let amount = c.amount.mul_floor(*ratio);
@@ -816,7 +816,7 @@ fn execute_process_new_entries_and_exits(
                 .filter(|c| !c.amount.is_zero())
                 .collect();
 
-            amounts_send_msg.extend(non_vault_rewards);
+            amounts_send_msg.extend(rewards);
 
             // if the address is waiting for exit, we are going to send him his assets in additon to the non vault rewards
             if addresses_waiting_for_exit.contains(address) {
