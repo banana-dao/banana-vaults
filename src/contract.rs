@@ -514,6 +514,10 @@ fn execute_add_to_position(
     swap: Option<Swap>,
 ) -> Result<Response, ContractError> {
     assert_owner(deps.storage, &info.sender)?;
+    
+    // since add to position actually creates a new position
+    ensure_uptime(&deps, &env, position_id)?;
+
     let config = CONFIG.load(deps.storage)?;
 
     let contract_address = env.contract.address;
@@ -587,24 +591,9 @@ fn execute_withdraw_position(
     liquidity_amount: String,
 ) -> Result<Response, ContractError> {
     assert_owner(deps.storage, &info.sender)?;
+    ensure_uptime(&deps, &env, position_id)?;
 
     let config = CONFIG.load(deps.storage)?;
-
-    let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
-
-    // if uptime is set, check if enough time has passed to withdraw
-    if let Some(uptime) = config.min_uptime {
-        let join_time = match cl_querier.position_by_id(position_id)?.position {
-            Some(position) => position.position.unwrap().join_time.unwrap().seconds,
-            None => {
-                return Err(ContractError::NoPositionsOpen {});
-            }
-        };
-
-        if env.block.time.seconds() as i64 - join_time < uptime as i64 {
-            return Err(ContractError::MinUptime());
-        }
-    }
 
     let mut messages: Vec<CosmosMsg> = vec![];
     let mut attributes: Vec<Attribute> = vec![];
@@ -1389,4 +1378,27 @@ fn verify_availability_of_funds(
     }
 
     Ok(())
+}
+
+fn ensure_uptime(deps: &DepsMut, env: &Env, position_id: u64) -> Result<(), ContractError> {
+    // if uptime is set, check if enough time has passed to withdraw without forfeiting rewards
+    if let Some(uptime) = CONFIG.load(deps.storage)?.min_uptime {
+        let join_time: u64 = match ConcentratedliquidityQuerier::new(&deps.querier)
+            .position_by_id(position_id)?
+            .position
+        {
+            Some(position) => position.position.unwrap().join_time.unwrap().seconds as u64,
+            None => {
+                return Err(ContractError::NoPositionsOpen {});
+            }
+        };
+
+        if env.block.time.seconds() - join_time < uptime {
+            Err(ContractError::MinUptime())
+        } else {
+            Ok(())
+        }
+    } else {
+        Ok(())
+    }
 }
