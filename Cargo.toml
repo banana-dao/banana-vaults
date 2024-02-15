@@ -31,3 +31,7 @@ serde = { version = "1.0.193", features = ["derive"] }
 thiserror = "1.0.52"
 pyth-sdk-cw = "1.2.0"
 prost = "0.12.3"
+
+[dev-dependencies]
+osmosis-test-tube = { version = "22.0.0", path = "./packages/osmosis-test-tube" }
+cosmos-sdk-proto = "0.20.0"

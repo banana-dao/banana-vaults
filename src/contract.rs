@@ -31,7 +31,7 @@ use osmosis_std_modified::types::{
     osmosis::concentratedliquidity::v1beta1::MsgWithdrawPosition,
 };
 use pyth_sdk_cw::{query_price_feed, PriceIdentifier};
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, ops::Mul, str::FromStr};
 
 // version info for migration info
 const CONTRACT_NAME: &str = env!("CARGO_PKG_NAME");
@@ -1236,8 +1236,11 @@ fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, 
         .filter_map(Result::ok)
         .collect();
 
-    let (available_in_vault_asset0, available_in_vault_asset1) =
+    let (available_asset0, available_asset1) =
         get_available_balances(&deps.as_ref(), &env.contract.address.to_string())?;
+
+    let dec_available_asset0 = Decimal::new(available_asset0.amount);
+    let dec_available_asset1 = Decimal::new(available_asset1.amount);
 
     let current_time = env.block.time.seconds();
 
@@ -1287,8 +1290,8 @@ fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, 
 
         if addresses_waiting_for_exit.contains(address) {
             // if the address is waiting for exit, add the funds to to withdraw
-            let amount_to_send_asset0 = available_in_vault_asset0.amount.mul_floor(*ratio);
-            let amount_to_send_asset1 = available_in_vault_asset1.amount.mul_floor(*ratio);
+            let amount_to_send_asset0 = available_asset0.amount.mul_floor(*ratio);
+            let amount_to_send_asset1 = available_asset1.amount.mul_floor(*ratio);
 
             if amount_to_send_asset0.gt(&Uint128::zero()) {
                 amounts_send_msg.push(coin(
@@ -1305,21 +1308,21 @@ fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, 
             }
         } else {
             // if not, collect the dollar amounts to recaulculate the vault ratios
-            let mut amount_assets0 = available_in_vault_asset0.amount.mul_floor(*ratio);
-            let mut amount_assets1 = available_in_vault_asset1.amount.mul_floor(*ratio);
+            let mut amount_asset0 = dec_available_asset0.mul(*ratio);
+            let mut amount_asset1 = dec_available_asset1.mul(*ratio);
 
             // If for some reason this address is actually waiting to join with more assets, we will add this here too
             if let Some(funds) =
                 ACCOUNTS_PENDING_ACTIVATION.may_load(deps.storage, address.clone())?
             {
-                amount_assets0 += funds[0].amount;
-                amount_assets1 += funds[1].amount;
+                amount_asset0 += Decimal::new(funds[0].amount);
+                amount_asset1 += Decimal::new(funds[1].amount);
                 // Remove it from here to avoid processing it again later
                 ACCOUNTS_PENDING_ACTIVATION.remove(deps.storage, address.clone());
             }
 
-            let dollars_asset0 = current_price_asset0.checked_mul(Decimal::new(amount_assets0))?;
-            let dollars_asset1 = current_price_asset1.checked_mul(Decimal::new(amount_assets1))?;
+            let dollars_asset0 = current_price_asset0.checked_mul(amount_asset0)?;
+            let dollars_asset1 = current_price_asset1.checked_mul(amount_asset1)?;
 
             let total_amount_dollars_for_address = dollars_asset0.checked_add(dollars_asset1)?;
 
@@ -1389,7 +1392,7 @@ fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, 
     Ok(messages)
 }
 
-trait PriceQuerier {
+pub trait PriceQuerier {
     fn query_asset_price(
         &self,
         querier: &QuerierWrapper,
@@ -1413,19 +1416,20 @@ impl PriceQuerier for PythQuerier {
         expiry: u64,
         exponent: u32,
     ) -> Result<Decimal, ContractError> {
-        let current_price = match query_price_feed(querier, contract_address, identifier)?
+        match query_price_feed(querier, contract_address, identifier)?
             .price_feed
             .get_price_no_older_than(time, expiry)
         {
-            Some(price) => Decimal::from_ratio(price.price as u128, 10_u64.pow(exponent)),
-            None => return Err(ContractError::StalePrice { seconds: expiry }),
-        };
-
-        Ok(current_price)
+            Some(price) => Ok(Decimal::from_ratio(
+                price.price as u128,
+                10_u64.pow(exponent),
+            )),
+            None => Err(ContractError::StalePrice { seconds: expiry }),
+        }
     }
 }
 
-struct MockPriceQuerier;
+pub struct MockPriceQuerier;
 
 impl PriceQuerier for MockPriceQuerier {
     fn query_asset_price(
@@ -1453,6 +1457,15 @@ impl PriceQuerier for MockPriceQuerier {
         {
             return Ok(Decimal::from_ratio(1031081328_u128, 10_u64.pow(exponent)));
         }
+        if identifier
+            == PriceIdentifier::from_hex(
+                "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+            )
+            .unwrap()
+        {
+            return Ok(Decimal::from_ratio(278558964008_u128, 10_u64.pow(18)));
+        }
+
         Ok(Decimal::zero())
     }
 }
