@@ -33,8 +33,8 @@ pub enum ContractError {
     #[error("You need to send funds that belong to this pool, and not repeat assets")]
     InvalidFunds {},
 
-    #[error("The assets you sent in the message are not in this CL pool")]
-    InvalidConfigAsset {},
+    #[error("Config asset{} is invalid", asset)]
+    InvalidConfigAsset { asset: u32 },
 
     #[error("The assets of the config cannot change")]
     CannotChangeAssets {},
