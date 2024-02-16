@@ -2,7 +2,7 @@ use crate::{
     msg::{
         ExecuteMsg::{CreatePosition, Join, Leave, ModifyConfig, WithdrawPosition},
         InstantiateMsg,
-        QueryMsg::TotalActiveAssets,
+        QueryMsg::{AccountsPendingExit, CanUpdate, TotalActiveAssets, VaultRatio},
         TotalAssetsResponse, VaultAsset,
     },
     state::Config,
@@ -20,6 +20,7 @@ use osmosis_test_tube::{
     SigningAccount, Wasm,
 };
 use pyth_sdk_cw::PriceIdentifier;
+use std::ops::Div;
 #[cfg(test)]
 use std::ops::Mul;
 struct TestEnv {
@@ -30,7 +31,10 @@ struct TestEnv {
 }
 
 // arbitrary precision for comparing dollar amounts (99.9999%)
-const PRECISION: (Uint128, Uint128) = (Uint128::new(999999), Uint128::new(1000000));
+const PRECISION: (Decimal, Decimal) = (
+    Decimal::new(Uint128::new(999999)),
+    Decimal::new(Uint128::new(1000000)),
+);
 
 const FEE_AMOUNT: u128 = 2500;
 const TOTAL_FEES: u128 = FEE_AMOUNT * 20 * JOINS.len() as u128;
@@ -188,8 +192,11 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
         )
         .unwrap();
 
-    let wasm_byte_code =
-        std::fs::read("./target/wasm32-unknown-unknown/release/banana_vault.wasm").unwrap();
+    let wasm_byte_code = std::fs::read("./target/wasm32-unknown-unknown/release/banana_vault.wasm")
+        .unwrap_or_default();
+    if wasm_byte_code.is_empty() {
+        panic!("could not read wasm file - run `cargo wasm` first")
+    }
     let code_id = modules
         .wasm
         .store_code(&wasm_byte_code, None, &test_env.admin)
@@ -269,7 +276,7 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
                         min_deposit: 1000000_u64.into(),
                     },
                     asset1,
-                    dollar_cap: Some(Uint128::from(500000000000_u128)),
+                    dollar_cap: None,
                     commission: Some(Decimal::from_ratio(1_u128, 100_u128)),
                     commission_receiver: Addr::unchecked(test_env.admin.address()),
                     pyth_contract_address: Addr::unchecked(
@@ -448,7 +455,7 @@ fn withdraw_position(test_env: &TestEnv, modules: &Modules) {
         .unwrap();
 }
 
-fn cycle_positions(test_env: &TestEnv, modules: &Modules) {
+fn cycle_positions(test_env: &TestEnv, modules: &Modules, exit: bool) {
     create_position(test_env, modules);
     // increase time to allow joins
     test_env.app.increase_time(601);
@@ -459,7 +466,9 @@ fn cycle_positions(test_env: &TestEnv, modules: &Modules) {
 
     // increase time again and trigger exits
     test_env.app.increase_time(601);
-    execute_leaves(test_env, modules);
+    if exit {
+        execute_leaves(test_env, modules);
+    }
     withdraw_position(test_env, modules);
 }
 
@@ -504,7 +513,7 @@ fn test_join_and_leave() {
             1_000_000,
         );
 
-        cycle_positions(&test_env, &modules);
+        cycle_positions(&test_env, &modules, true);
 
         let uosmo_final_balances = user_balance_list(&test_env, &modules, "uosmo".to_string());
         let uatom_final_balances = user_balance_list(&test_env, &modules, "uatom".to_string());
@@ -518,21 +527,21 @@ fn test_join_and_leave() {
         let mut initial_dollar_value = vec![];
 
         for balance in uosmo_initial_balances.iter() {
-            initial_dollar_value.push(Uint128::new(*balance).mul_floor(get_price("uosmo")));
+            initial_dollar_value.push(Decimal::new(Uint128::new(*balance)).mul(get_price("uosmo")));
         }
 
         for (i, balance) in uatom_initial_balances.iter().enumerate() {
-            initial_dollar_value[i] += Uint128::new(*balance).mul_floor(get_price("uatom"));
+            initial_dollar_value[i] += Decimal::new(Uint128::new(*balance)).mul(get_price("uatom"));
         }
 
         let mut final_dollar_value = vec![];
 
         for balance in uosmo_final_balances.iter() {
-            final_dollar_value.push(Uint128::new(*balance).mul_floor(get_price("uosmo")));
+            final_dollar_value.push(Decimal::new(Uint128::new(*balance)).mul(get_price("uosmo")));
         }
 
         for (i, balance) in uatom_final_balances.iter().enumerate() {
-            final_dollar_value[i] += Uint128::new(*balance).mul_floor(get_price("uatom"));
+            final_dollar_value[i] += Decimal::new(Uint128::new(*balance)).mul(get_price("uatom"));
         }
 
         // println!("initial_dollar_value {:?}", initial_dollar_value);
@@ -542,8 +551,7 @@ fn test_join_and_leave() {
         assert!(final_dollar_value
             .iter()
             .zip(initial_dollar_value.iter())
-            .all(|(fin, initial)| fin
-                >= &(initial.mul(PRECISION.0).checked_div(PRECISION.1).unwrap())));
+            .all(|(fin, initial)| fin >= &(initial.mul(PRECISION.0.div(PRECISION.1)))));
 
         // check that the contract balance is also correct
         let final_contract_balance: TotalAssetsResponse = modules
@@ -581,14 +589,9 @@ fn test_join_and_leave_with_18_exp() {
             .query(&test_env.contract_addr, &TotalActiveAssets {})
             .unwrap();
 
-        let initial_contract_dollar_value = initial_contract_balance
-            .asset0
-            .amount
-            .mul_floor(get_price("uosmo"))
-            + initial_contract_balance
-                .asset1
-                .amount
-                .mul_floor(get_price("wei"));
+        let initial_contract_dollar_value = Decimal::new(initial_contract_balance.asset0.amount)
+            .mul(get_price("uosmo"))
+            + Decimal::new(initial_contract_balance.asset1.amount).mul(get_price("wei"));
 
         let uosmo_initial_balances = execute_joins(
             &test_env,
@@ -605,7 +608,7 @@ fn test_join_and_leave_with_18_exp() {
             1_000_000_000_000_000_000,
         );
 
-        cycle_positions(&test_env, &modules);
+        cycle_positions(&test_env, &modules, true);
 
         let uosmo_final_balances = user_balance_list(&test_env, &modules, "uosmo".to_string());
         let wei_final_balances = user_balance_list(&test_env, &modules, "wei".to_string());
@@ -647,21 +650,12 @@ fn test_join_and_leave_with_18_exp() {
             .query(&test_env.contract_addr, &TotalActiveAssets {})
             .unwrap();
 
-        let final_dollar_value = final_contract_balance
-            .asset0
-            .amount
-            .mul_floor(get_price("uosmo"))
-            + final_contract_balance
-                .asset1
-                .amount
-                .mul_floor(get_price("wei"));
+        let final_dollar_value = Decimal::new(final_contract_balance.asset0.amount)
+            .mul(get_price("uosmo"))
+            + Decimal::new(final_contract_balance.asset1.amount).mul(get_price("wei"));
 
         assert!(
-            final_dollar_value
-                >= initial_contract_dollar_value
-                    .mul(PRECISION.0)
-                    .checked_div(PRECISION.1)
-                    .unwrap()
+            final_dollar_value >= initial_contract_dollar_value.mul(PRECISION.0.div(PRECISION.1))
         );
     }
 }
@@ -680,8 +674,8 @@ fn test_multiple_recalculations() {
         ])
         .unwrap();
 
-    let intial_usd = Uint128::new(100 * 1_000_000).mul_floor(get_price("uatom"))
-        + Uint128::new(1000 * 1_000_000 - (FEE_AMOUNT * 2)).mul_floor(get_price("uosmo"));
+    let intial_usd = Decimal::new(Uint128::new(100 * 1_000_000)).mul(get_price("uatom"))
+        + Decimal::new(Uint128::new(1000 * 1_000_000 - (FEE_AMOUNT * 2))).mul(get_price("uosmo"));
 
     println!("initial USD: {}", intial_usd);
 
@@ -717,7 +711,7 @@ fn test_multiple_recalculations() {
             1_000_000,
         );
 
-        cycle_positions(&test_env, &modules);
+        cycle_positions(&test_env, &modules, true);
     }
 
     modules
@@ -730,7 +724,7 @@ fn test_multiple_recalculations() {
         )
         .unwrap();
 
-    cycle_positions(&test_env, &modules);
+    cycle_positions(&test_env, &modules, false);
 
     let uosmo_final_balance: Uint128 = modules
         .bank
@@ -760,18 +754,155 @@ fn test_multiple_recalculations() {
         .unwrap()
         .into();
 
-    let final_dollar_value = uosmo_final_balance.mul_floor(get_price("uosmo"))
-        + uatom_final_balance.mul_floor(get_price("uatom"));
+    let final_dollar_value = Decimal::new(uosmo_final_balance).mul(get_price("uosmo"))
+        + Decimal::new(uatom_final_balance).mul(get_price("uatom"));
 
     println!("final uosmo balance: {}", uosmo_final_balance);
     println!("final uatom balance: {}", uatom_final_balance);
     println!("final USD: {}", final_dollar_value);
 
-    assert!(
-        final_dollar_value
-            >= intial_usd
-                .mul(PRECISION.0)
-                .checked_div(PRECISION.1)
-                .unwrap()
+    assert!(final_dollar_value >= intial_usd.mul(PRECISION.0.div(PRECISION.1)));
+}
+
+#[test]
+fn test_queries() {
+    let test_env = setup_contract(get_asset("uatom"));
+    let modules = get_modules(&test_env);
+
+    // let initial_contract_balance: TotalAssetsResponse = modules
+    //     .wasm
+    //     .query(&test_env.contract_addr, &TotalActiveAssets {})
+    //     .unwrap();
+
+    // let initial_contract_dollar_value = initial_contract_balance
+    //     .asset0
+    //     .amount
+    //     .mul_floor(get_price("uosmo"))
+    //     + initial_contract_balance
+    //         .asset1
+    //         .amount
+    //         .mul_floor(get_price("uatom"));
+
+    execute_joins(
+        &test_env,
+        &modules,
+        JOINS[4],
+        &"uosmo".to_string(),
+        1_000_000,
     );
+    execute_joins(
+        &test_env,
+        &modules,
+        JOINS[5],
+        &"uatom".to_string(),
+        1_000_000,
+    );
+
+    cycle_positions(&test_env, &modules, false);
+
+    // tests CanUpdate query
+    let can_update: bool = modules
+        .wasm
+        .query(&test_env.contract_addr, &CanUpdate {})
+        .unwrap();
+
+    assert!(!can_update);
+
+    test_env.app.increase_time(601);
+
+    let can_update: bool = modules
+        .wasm
+        .query(&test_env.contract_addr, &CanUpdate {})
+        .unwrap();
+
+    assert!(can_update);
+
+    modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &Leave { address: None },
+            &[],
+            &test_env.users[0],
+        )
+        .unwrap();
+
+    let pendings_exits: Vec<Addr> = modules
+        .wasm
+        .query(&test_env.contract_addr, &AccountsPendingExit {})
+        .unwrap();
+
+    assert_eq!(pendings_exits.len(), 1);
+
+    // checks if user ratio converted to dollars accurately represents the funds they leave with
+    let user_ratio: Decimal = modules
+        .wasm
+        .query(
+            &test_env.contract_addr,
+            &VaultRatio {
+                address: Addr::unchecked(test_env.users[0].address()),
+            },
+        )
+        .unwrap();
+
+    let contract_balance: TotalAssetsResponse = modules
+        .wasm
+        .query(&test_env.contract_addr, &TotalActiveAssets {})
+        .unwrap();
+
+    let contract_dollar_value: Decimal = Decimal::new(contract_balance.asset0.amount)
+        .mul(get_price("uosmo"))
+        + Decimal::new(contract_balance.asset1.amount).mul(get_price("uatom"));
+
+    let uosmo_balance =
+        Uint128::new(user_balance_list(&test_env, &modules, "uosmo".to_string())[0]);
+    let uatom_balance =
+        Uint128::new(user_balance_list(&test_env, &modules, "uatom".to_string())[0]);
+
+    let dollar_balance = Decimal::new(uosmo_balance).mul(get_price("uosmo"))
+        + Decimal::new(uatom_balance).mul(get_price("uatom"));
+
+    cycle_positions(&test_env, &modules, false);
+
+    let final_dollar_balance = Decimal::new(Uint128::new(
+        user_balance_list(&test_env, &modules, "uosmo".to_string())[0],
+    ))
+    .mul(get_price("uosmo"))
+        + Decimal::new(Uint128::new(
+            user_balance_list(&test_env, &modules, "uatom".to_string())[0],
+        ))
+        .mul(get_price("uatom"));
+
+    assert!(
+        final_dollar_balance - dollar_balance
+            >= user_ratio
+                .mul(contract_dollar_value)
+                .mul(PRECISION.0.div(PRECISION.1))
+    );
+
+    // check that TotalAssetsResponse return the value of assets we can use
+    let new_contract_balance: TotalAssetsResponse = modules
+        .wasm
+        .query(&test_env.contract_addr, &TotalActiveAssets {})
+        .unwrap();
+
+    modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &CreatePosition {
+                lower_tick: -10000,
+                upper_tick: 10000,
+                tokens_provided: vec![
+                    new_contract_balance.asset1.clone(),
+                    new_contract_balance.asset0.clone(),
+                ],
+                token_min_amount0: "1".to_string(),
+                token_min_amount1: "1".to_string(),
+                swap: None,
+            },
+            &[],
+            &test_env.admin,
+        )
+        .unwrap();
 }

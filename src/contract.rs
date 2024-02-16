@@ -788,7 +788,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::TotalPendingAssets {} => to_json_binary(&query_total_pending_assets(deps)?),
         QueryMsg::CanUpdate {} => to_json_binary(&query_can_update(deps, env)?),
         QueryMsg::PendingJoin { address } => to_json_binary(&query_pending_join(deps, address)?),
-        QueryMsg::AccountsPendingExit {} => to_json_binary(&query_pending_exit(deps)?),
+        QueryMsg::AccountsPendingExit {} => to_json_binary(&query_pending_exits(deps)?),
         QueryMsg::VaultRatio { address } => to_json_binary(&query_vault_ratio(deps, address)?),
         QueryMsg::WhitelistedDepositors { start_after, limit } => {
             to_json_binary(&query_whitelisted_depositors(deps, start_after, limit))
@@ -804,7 +804,7 @@ fn query_config(deps: Deps) -> StdResult<Config> {
 fn query_total_active_assets(deps: Deps, env: Env) -> StdResult<TotalAssetsResponse> {
     let config = CONFIG.load(deps.storage)?;
     let address = env.contract.address.to_string();
-    let commission = config.commission.unwrap_or(Decimal::zero());
+    let commission_remainder = Decimal::one() - config.commission.unwrap_or(Decimal::zero());
 
     let (mut asset0, mut asset1) = get_available_balances(&deps, &address)?;
 
@@ -833,11 +833,11 @@ fn query_total_active_assets(deps: Deps, env: Env) -> StdResult<TotalAssetsRespo
         if !position.claimable_incentives.is_empty() {
             for incentive in &position.claimable_incentives {
                 if incentive.denom == config.asset0.denom {
-                    asset0.amount += Uint128::from_str(&incentive.amount)?
-                        .mul_floor(Decimal::one() - commission);
+                    asset0.amount +=
+                        Uint128::from_str(&incentive.amount)?.mul_floor(commission_remainder);
                 } else if incentive.denom == config.asset1.denom {
-                    asset1.amount += Uint128::from_str(&incentive.amount)?
-                        .mul_floor(Decimal::one() - commission);
+                    asset1.amount +=
+                        Uint128::from_str(&incentive.amount)?.mul_floor(commission_remainder);
                 }
             }
         }
@@ -845,9 +845,11 @@ fn query_total_active_assets(deps: Deps, env: Env) -> StdResult<TotalAssetsRespo
         if !position.claimable_spread_rewards.is_empty() {
             for incentive in &position.claimable_spread_rewards {
                 if incentive.denom == config.asset0.denom {
-                    asset0.amount += Uint128::from_str(&incentive.amount)?;
+                    asset0.amount +=
+                        Uint128::from_str(&incentive.amount)?.mul_floor(commission_remainder);
                 } else if incentive.denom == config.asset1.denom {
-                    asset1.amount += Uint128::from_str(&incentive.amount)?;
+                    asset1.amount +=
+                        Uint128::from_str(&incentive.amount)?.mul_floor(commission_remainder);
                 }
             }
         }
@@ -857,21 +859,11 @@ fn query_total_active_assets(deps: Deps, env: Env) -> StdResult<TotalAssetsRespo
 }
 
 fn query_total_pending_assets(deps: Deps) -> StdResult<TotalAssetsResponse> {
-    let config = CONFIG.load(deps.storage)?;
-    let asset0_denom = config.asset0.denom;
-    let asset1_denom = config.asset1.denom;
-    let mut asset0 = coin(0, asset0_denom.to_owned());
-    let mut asset1 = coin(0, asset1_denom.to_owned());
-
-    for asset in ASSETS_PENDING_ACTIVATION.load(deps.storage)? {
-        if asset.denom == asset0_denom {
-            asset0.amount += asset.amount;
-        } else if asset.denom == asset1_denom {
-            asset1.amount += asset.amount;
-        }
-    }
-
-    Ok(TotalAssetsResponse { asset0, asset1 })
+    let pending_assets = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
+    Ok(TotalAssetsResponse {
+        asset0: pending_assets[0].clone(),
+        asset1: pending_assets[1].clone(),
+    })
 }
 
 fn query_can_update(deps: Deps, env: Env) -> StdResult<bool> {
@@ -880,15 +872,13 @@ fn query_can_update(deps: Deps, env: Env) -> StdResult<bool> {
 }
 
 fn query_pending_join(deps: Deps, address: Addr) -> StdResult<Vec<Coin>> {
-    let assets = ACCOUNTS_PENDING_ACTIVATION
+    Ok(ACCOUNTS_PENDING_ACTIVATION
         .may_load(deps.storage, address)?
-        .unwrap_or_default();
-    Ok(assets)
+        .unwrap_or_default())
 }
 
-fn query_pending_exit(deps: Deps) -> StdResult<Vec<Addr>> {
-    let addresses = ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)?;
-    Ok(addresses)
+fn query_pending_exits(deps: Deps) -> StdResult<Vec<Addr>> {
+    ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)
 }
 
 fn query_vault_ratio(deps: Deps, address: Addr) -> StdResult<Decimal> {
