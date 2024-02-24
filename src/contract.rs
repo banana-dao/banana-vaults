@@ -307,6 +307,16 @@ fn execute_join(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractEr
         return Err(ContractError::CapReached {});
     }
 
+    // Check if user is already waiting to exit
+    if ADDRESSES_WAITING_FOR_EXIT
+        .load(deps.storage)?
+        .contains(&info.sender)
+    {
+        return Err(ContractError::AddressPendingExit {
+            address: info.sender.to_string(),
+        });
+    }
+
     // We queue up the assets for the next iteration
     let mut assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
 
@@ -1015,13 +1025,13 @@ fn ensure_uptime(deps: &DepsMut, env: &Env, position_id: u64) -> Result<(), Cont
             .position_by_id(position_id)?
             .position
         {
-            Some(position) => position.position.unwrap().join_time.unwrap().seconds as u64,
+            Some(position) => position.position.unwrap().join_time.unwrap().nanos as u64,
             None => {
                 return Err(ContractError::NoPositionsOpen {});
             }
         };
 
-        if env.block.time.seconds() - join_time < uptime {
+        if env.block.time.nanos() - join_time < uptime {
             Err(ContractError::MinUptime())
         } else {
             Ok(())
