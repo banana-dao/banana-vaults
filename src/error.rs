@@ -86,4 +86,7 @@ pub enum ContractError {
 
     #[error("You can't make someone else exit")]
     CannotForceExit {},
+
+    #[error("Address {} is already pending exit", address)]
+    AddressPendingExit { address: String },
 }
