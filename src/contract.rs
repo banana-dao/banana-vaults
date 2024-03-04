@@ -1381,6 +1381,21 @@ fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, 
         )?;
     }
 
+    non_vault_rewards.retain(|c| !c.amount.is_zero());
+
+    // If the vault is closed we send the dust left to the owner account
+    if VAULT_TERMINATED.load(deps.storage)? {
+        messages.push(
+            BankMsg::Send {
+                to_address: get_ownership(deps.storage)?.owner.unwrap().to_string(),
+                amount: non_vault_rewards.clone(),
+            }
+            .into(),
+        );
+    }
+
+    NON_VAULT_REWARDS.save(deps.storage, &non_vault_rewards)?;
+
     // Now we are going to process all the new entries
     let new_entries: Vec<(Addr, Vec<Coin>)> = ACCOUNTS_PENDING_ACTIVATION
         .range(deps.storage, None, None, Order::Ascending)
