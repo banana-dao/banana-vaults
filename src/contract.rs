@@ -2,7 +2,7 @@ use crate::{
     error::ContractError,
     msg::{
         ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg, Swap, TotalAssetsResponse,
-        WhitelistedDepositorsResponse,
+        VaultParticipant, VaultParticipantsResponse, WhitelistedDepositorsResponse,
     },
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
@@ -803,6 +803,9 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::WhitelistedDepositors { start_after, limit } => {
             to_json_binary(&query_whitelisted_depositors(deps, start_after, limit))
         }
+        QueryMsg::VaultParticipants { start_after, limit } => {
+            to_json_binary(&query_vault_participants(deps, start_after, limit))
+        }
     }
 }
 
@@ -915,6 +918,23 @@ fn query_whitelisted_depositors(
     WhitelistedDepositorsResponse {
         whitelisted_depositors,
     }
+}
+
+fn query_vault_participants(
+    deps: Deps,
+    start_after: Option<Addr>,
+    limit: Option<u32>,
+) -> VaultParticipantsResponse {
+    let limit = limit.unwrap_or(MAX_PAGE_LIMIT).min(MAX_PAGE_LIMIT);
+    let start = start_after.map(Bound::exclusive);
+    let vault_participants: Vec<VaultParticipant> = VAULT_RATIO
+        .range(deps.storage, start, None, Order::Ascending)
+        .take(limit as usize)
+        .filter_map(|v| v.ok())
+        .map(|(address, ratio)| VaultParticipant { address, ratio })
+        .collect();
+
+    VaultParticipantsResponse { vault_participants }
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]

@@ -134,6 +134,11 @@ pub enum QueryMsg {
         start_after: Option<Addr>,
         limit: Option<u32>,
     },
+    #[returns(VaultParticipantsResponse)]
+    VaultParticipants {
+        start_after: Option<Addr>,
+        limit: Option<u32>,
+    },
 }
 
 #[cw_serde]
@@ -145,6 +150,17 @@ pub struct TotalAssetsResponse {
 #[cw_serde]
 pub struct WhitelistedDepositorsResponse {
     pub whitelisted_depositors: Vec<Addr>,
+}
+
+#[cw_serde]
+pub struct VaultParticipantsResponse {
+    pub vault_participants: Vec<VaultParticipant>,
+}
+
+#[cw_serde]
+pub struct VaultParticipant {
+    pub address: Addr,
+    pub ratio: Decimal,
 }
 
 #[cw_serde]
