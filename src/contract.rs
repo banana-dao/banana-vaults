@@ -266,6 +266,7 @@ fn execute_whitelist(
     }
 
     for address in remove {
+        deps.api.addr_validate(address.as_str())?;
         match WHITELISTED_DEPOSITORS.may_load(deps.storage, address.clone())? {
             Some(_) => {
                 WHITELISTED_DEPOSITORS.remove(deps.storage, address.clone());
