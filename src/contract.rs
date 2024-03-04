@@ -1388,7 +1388,7 @@ fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, 
         messages.push(
             BankMsg::Send {
                 to_address: get_ownership(deps.storage)?.owner.unwrap().to_string(),
-                amount: non_vault_rewards.clone(),
+                amount: non_vault_rewards,
             }
             .into(),
         );
