@@ -1250,7 +1250,7 @@ fn prepare_swap(
 fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     let mut non_vault_rewards: Vec<Coin> = NON_VAULT_REWARDS.load(deps.storage)?;
-    let mut total_non_vault_rewards = Coins::default();
+    let mut distributed_non_vault_rewards = Coins::default();
     let addresses_waiting_for_exit = ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)?;
 
     let ratios: Vec<(Addr, Decimal)> = VAULT_RATIO
@@ -1308,7 +1308,7 @@ fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, 
             })
             .filter(|c| !c.amount.is_zero())
             .map(|c| {
-                total_non_vault_rewards.add(c.clone()).unwrap();
+                distributed_non_vault_rewards.add(c.clone()).unwrap();
                 c
             })
             .collect();
@@ -1373,7 +1373,7 @@ fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, 
     // Reduce all non vault rewards by the total amount sent
     for each_non_vault_reward in non_vault_rewards.iter_mut() {
         each_non_vault_reward.amount = each_non_vault_reward.amount.checked_sub(
-            total_non_vault_rewards
+            distributed_non_vault_rewards
                 .iter()
                 .find(|c| c.denom == each_non_vault_reward.denom)
                 .map(|c| c.amount)
@@ -1383,11 +1383,11 @@ fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, 
 
     non_vault_rewards.retain(|c| !c.amount.is_zero());
 
-    // If the vault is closed we send the dust left to the owner account
+    // If the vault is closed we send the dust left to the commission receiver
     if VAULT_TERMINATED.load(deps.storage)? {
         messages.push(
             BankMsg::Send {
-                to_address: get_ownership(deps.storage)?.owner.unwrap().to_string(),
+                to_address: config.commission_receiver.to_string(),
                 amount: non_vault_rewards,
             }
             .into(),
