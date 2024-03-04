@@ -1392,6 +1392,7 @@ fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, 
             }
             .into(),
         );
+        non_vault_rewards = vec![];
     }
 
     NON_VAULT_REWARDS.save(deps.storage, &non_vault_rewards)?;
