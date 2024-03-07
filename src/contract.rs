@@ -6,8 +6,8 @@ use crate::{
     },
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
-        CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, LAST_UPDATE, NON_VAULT_REWARDS, VAULT_RATIO,
-        VAULT_TERMINATED, WHITELISTED_DEPOSITORS,
+        CAP_REACHED, CONFIG, HALT_EXITS_AND_JOINS, JOIN_TIME, LAST_UPDATE, NON_VAULT_REWARDS,
+        VAULT_RATIO, VAULT_TERMINATED, WHITELISTED_DEPOSITORS,
     },
 };
 use cosmwasm_std::{
@@ -43,7 +43,6 @@ const PYTH_MAINNET_CONTRACT_ADDRESS: &str =
     "osmo13ge29x4e2s63a8ytz2px8gurtyznmue4a69n5275692v3qn3ks8q7cwck7";
 
 // Sensible defaults for update frequency
-const DEFAULT_MIN_UPDATE_FREQUENCY: u64 = 600; // 10 minutes
 const DEFAULT_MAX_UPDATE_FREQUENCY: u64 = 86400 * 14; // 14 days
 
 // Pagination
@@ -100,9 +99,6 @@ pub fn instantiate(
         dollar_cap: msg.dollar_cap,
         pyth_contract_address: Addr::unchecked(pyth_contract_address),
         price_expiry: msg.price_expiry,
-        min_update_frequency: msg
-            .min_update_frequency
-            .unwrap_or(DEFAULT_MIN_UPDATE_FREQUENCY),
         max_update_frequency: msg
             .max_update_frequency
             .unwrap_or(DEFAULT_MAX_UPDATE_FREQUENCY),
@@ -136,6 +132,7 @@ pub fn instantiate(
     HALT_EXITS_AND_JOINS.save(deps.storage, &false)?;
     VAULT_TERMINATED.save(deps.storage, &false)?;
     NON_VAULT_REWARDS.save(deps.storage, &vec![])?;
+    JOIN_TIME.save(deps.storage, &0)?;
 
     Ok(Response::new()
         .add_attribute("action", "banana_vault_instantiate")
@@ -196,7 +193,10 @@ pub fn execute(
         ExecuteMsg::WithdrawPosition {
             position_id,
             liquidity_amount,
-        } => execute_withdraw_position(deps, env, info, position_id, liquidity_amount),
+            update_users,
+        } => {
+            execute_withdraw_position(deps, env, info, position_id, liquidity_amount, update_users)
+        }
         ExecuteMsg::ProcessNewEntriesAndExits {} => {
             execute_process_new_entries_and_exits(deps, env, info)
         }
@@ -444,15 +444,8 @@ fn execute_create_position(
     assert_owner(deps.storage, &info.sender)?;
     let config = CONFIG.load(deps.storage)?;
 
-    // limit number of open positions to 10 for safety as we don't need more and don't want to bother with pagination
-    let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
-    if cl_querier
-        .user_positions(env.contract.address.to_string(), config.pool_id, None)?
-        .positions
-        .len()
-        >= 10
-    {
-        return Err(ContractError::MaxPositionsReached {});
+    if JOIN_TIME.load(deps.storage)? != 0 {
+        return Err(ContractError::PositionOpen {});
     }
 
     let mut messages = vec![];
@@ -507,6 +500,8 @@ fn execute_create_position(
 
     attributes.push(attr("action", "banana_vault_create_position"));
 
+    JOIN_TIME.save(deps.storage, &env.block.time.seconds())?;
+
     Ok(Response::new()
         .add_messages(messages)
         .add_attributes(attributes))
@@ -527,7 +522,7 @@ fn execute_add_to_position(
     assert_owner(deps.storage, &info.sender)?;
 
     // since add to position actually creates a new position
-    ensure_uptime(&deps, &env, position_id)?;
+    ensure_uptime(&deps, &env)?;
 
     let config = CONFIG.load(deps.storage)?;
 
@@ -599,11 +594,10 @@ fn execute_withdraw_position(
     info: MessageInfo,
     position_id: u64,
     liquidity_amount: String,
+    update_users: Option<bool>,
 ) -> Result<Response, ContractError> {
     assert_owner(deps.storage, &info.sender)?;
-    ensure_uptime(&deps, &env, position_id)?;
-
-    let config = CONFIG.load(deps.storage)?;
+    ensure_uptime(&deps, &env)?;
 
     let mut messages: Vec<CosmosMsg> = vec![];
     let mut attributes: Vec<Attribute> = vec![];
@@ -624,21 +618,19 @@ fn execute_withdraw_position(
     messages.push(msg_withdraw_position);
     attributes.push(attr("action", "banana_vault_withdraw_position"));
 
-    let last_update = LAST_UPDATE.load(deps.storage)?;
-
-    // We will only execute this message if it's time for update (it will execute after the withdraw and check if there are any positions open)
-    let update_users_msg = CosmosMsg::Wasm(WasmMsg::Execute {
-        contract_addr: env.contract.address.to_string(),
-        msg: to_json_binary(&ExecuteMsg::ProcessNewEntriesAndExits {})?,
-        funds: vec![],
-    });
-
-    // We can only update if it's time for update and if vault is not halted
-    if !HALT_EXITS_AND_JOINS.load(deps.storage)?
-        && env.block.time.seconds() >= last_update + config.min_update_frequency
-    {
-        messages.push(update_users_msg)
+    // operator will decide if we are to update users after the position is withdrawn
+    if update_users.unwrap_or_default() {
+        messages.push(
+            WasmMsg::Execute {
+                contract_addr: env.contract.address.to_string(),
+                msg: to_json_binary(&ExecuteMsg::ProcessNewEntriesAndExits {})?,
+                funds: vec![],
+            }
+            .into(),
+        );
     }
+
+    JOIN_TIME.save(deps.storage, &0)?;
 
     Ok(Response::new()
         .add_messages(messages)
@@ -663,19 +655,24 @@ fn execute_process_new_entries_and_exits(
         return Err(ContractError::Unauthorized {});
     }
 
-    let config = CONFIG.load(deps.storage)?;
+    let addresses_waiting_for_exit = ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)?;
+    let new_entries: Vec<(Addr, Vec<Coin>)> = ACCOUNTS_PENDING_ACTIVATION
+        .range(deps.storage, None, None, Order::Ascending)
+        .filter_map(Result::ok)
+        .collect();
 
-    // can only proceed if no current positions are open
-    if ConcentratedliquidityQuerier::new(&deps.querier)
-        .user_positions(env.contract.address.to_string(), config.pool_id, None)?
-        .positions
-        .is_empty()
-    {
+    // should only proceed if some exits or entries are waiting
+    if !addresses_waiting_for_exit.is_empty() || !new_entries.is_empty() {
         Ok(Response::new()
-            .add_messages(process_entries_and_exits(deps, env)?)
-            .add_attribute("action", "banana_vault_process_new_entries_and_exits"))
+            .add_messages(process_entries_and_exits(
+                deps,
+                env,
+                addresses_waiting_for_exit,
+                new_entries,
+            )?)
+            .add_attribute("action", "banana_vault_process"))
     } else {
-        Ok(Response::new())
+        Ok(Response::default())
     }
 }
 
@@ -796,7 +793,6 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::Ownership {} => to_json_binary(&get_ownership(deps.storage)?),
         QueryMsg::TotalActiveAssets {} => to_json_binary(&query_total_active_assets(deps, env)?),
         QueryMsg::TotalPendingAssets {} => to_json_binary(&query_total_pending_assets(deps)?),
-        QueryMsg::CanUpdate {} => to_json_binary(&query_can_update(deps, env)?),
         QueryMsg::PendingJoin { address } => to_json_binary(&query_pending_join(deps, address)?),
         QueryMsg::AccountsPendingExit {} => to_json_binary(&query_pending_exits(deps)?),
         QueryMsg::VaultRatio { address } => to_json_binary(&query_vault_ratio(deps, address)?),
@@ -877,11 +873,6 @@ fn query_total_pending_assets(deps: Deps) -> StdResult<TotalAssetsResponse> {
         asset0: pending_assets[0].clone(),
         asset1: pending_assets[1].clone(),
     })
-}
-
-fn query_can_update(deps: Deps, env: Env) -> StdResult<bool> {
-    Ok(env.block.time.seconds()
-        >= LAST_UPDATE.load(deps.storage)? + CONFIG.load(deps.storage)?.min_update_frequency)
 }
 
 fn query_pending_join(deps: Deps, address: Addr) -> StdResult<Vec<Coin>> {
@@ -1038,21 +1029,11 @@ fn verify_availability_of_funds(
     Ok(())
 }
 
-fn ensure_uptime(deps: &DepsMut, env: &Env, position_id: u64) -> Result<(), ContractError> {
+fn ensure_uptime(deps: &DepsMut, env: &Env) -> Result<(), ContractError> {
     // if uptime is set, check if enough time has passed to withdraw without forfeiting rewards
     if let Some(uptime) = CONFIG.load(deps.storage)?.min_uptime {
-        let join_time: u64 = match ConcentratedliquidityQuerier::new(&deps.querier)
-            .position_by_id(position_id)?
-            .position
-        {
-            Some(position) => position.position.unwrap().join_time.unwrap().seconds as u64,
-            None => {
-                return Err(ContractError::NoPositionsOpen {});
-            }
-        };
-
         // add one second for rounding safety
-        if env.block.time.seconds() - join_time < uptime + 1 {
+        if env.block.time.seconds() - JOIN_TIME.load(deps.storage)? < uptime + 1 {
             Err(ContractError::MinUptime())
         } else {
             Ok(())
@@ -1247,11 +1228,15 @@ fn prepare_swap(
     ))
 }
 
-fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, ContractError> {
+fn process_entries_and_exits(
+    deps: DepsMut,
+    env: Env,
+    addresses_waiting_for_exit: Vec<Addr>,
+    new_entries: Vec<(Addr, Vec<Coin>)>,
+) -> Result<Vec<CosmosMsg>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     let mut non_vault_rewards: Vec<Coin> = NON_VAULT_REWARDS.load(deps.storage)?;
     let mut distributed_non_vault_rewards = Coins::default();
-    let addresses_waiting_for_exit = ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)?;
 
     let ratios: Vec<(Addr, Decimal)> = VAULT_RATIO
         .range(deps.storage, None, None, Order::Ascending)
@@ -1396,12 +1381,6 @@ fn process_entries_and_exits(deps: DepsMut, env: Env) -> Result<Vec<CosmosMsg>, 
     }
 
     NON_VAULT_REWARDS.save(deps.storage, &non_vault_rewards)?;
-
-    // Now we are going to process all the new entries
-    let new_entries: Vec<(Addr, Vec<Coin>)> = ACCOUNTS_PENDING_ACTIVATION
-        .range(deps.storage, None, None, Order::Ascending)
-        .filter_map(Result::ok)
-        .collect();
 
     for new_entry in &new_entries {
         let dollars_asset0 =

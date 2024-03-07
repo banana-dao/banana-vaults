@@ -75,8 +75,8 @@ pub enum ContractError {
     #[error("Can't remove position, age is less than min uptime")]
     MinUptime(),
 
-    #[error("Maximum number of positions reached")]
-    MaxPositionsReached(),
+    #[error("Position already open")]
+    PositionOpen(),
 
     #[error("Address {} already whitelisted", address)]
     AddressInWhitelist { address: String },
