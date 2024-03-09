@@ -253,22 +253,23 @@ fn execute_whitelist(
     assert_owner(deps.storage, &info.sender)?;
     let mut attributes: Vec<Attribute> = vec![];
     for address in add {
-        if (WHITELISTED_DEPOSITORS.may_load(deps.storage, info.sender.to_owned())?).is_some() {
+        deps.api.addr_validate(address.as_str())?;
+        if WHITELISTED_DEPOSITORS.has(deps.storage, address.clone()) {
             return Err(ContractError::AddressInWhitelist {
                 address: address.to_string(),
             });
         }
 
-        deps.api.addr_validate(address.as_str())?;
-        WHITELISTED_DEPOSITORS.save(deps.storage, info.sender.to_owned(), &Empty {})?;
+        WHITELISTED_DEPOSITORS.save(deps.storage, address.clone(), &Empty {})?;
         attributes.push(attr("action", "banana_vault_whitelist_add"));
         attributes.push(attr("address", address));
     }
 
     for address in remove {
-        match WHITELISTED_DEPOSITORS.may_load(deps.storage, info.sender.to_owned())? {
+        deps.api.addr_validate(address.as_str())?;
+        match WHITELISTED_DEPOSITORS.may_load(deps.storage, address.clone())? {
             Some(_) => {
-                WHITELISTED_DEPOSITORS.remove(deps.storage, info.sender.to_owned());
+                WHITELISTED_DEPOSITORS.remove(deps.storage, address.clone());
                 attributes.push(attr("action", "banana_vault_whitelist_remove"));
                 attributes.push(attr("address", address))
             }
