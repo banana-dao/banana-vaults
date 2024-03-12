@@ -135,6 +135,10 @@ pub enum QueryMsg {
         start_after: Option<Addr>,
         limit: Option<u32>,
     },
+    #[returns(Vec<Coin>)]
+    NonVaultRewards {},
+    #[returns(Status)]
+    Status {},
 }
 
 #[cw_serde]
@@ -157,6 +161,15 @@ pub struct VaultParticipantsResponse {
 pub struct VaultParticipant {
     pub address: Addr,
     pub ratio: Decimal,
+}
+
+#[cw_serde]
+pub struct Status {
+    pub join_time: u64,
+    pub last_update: u64,
+    pub cap_reached: bool,
+    pub halted: bool,
+    pub closed: bool,
 }
 
 #[cw_serde]

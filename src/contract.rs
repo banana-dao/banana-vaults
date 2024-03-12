@@ -1,7 +1,7 @@
 use crate::{
     error::ContractError,
     msg::{
-        ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg, Swap, TotalAssetsResponse,
+        ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg, Status, Swap, TotalAssetsResponse,
         VaultParticipant, VaultParticipantsResponse, WhitelistedDepositorsResponse,
     },
     state::{
@@ -655,6 +655,11 @@ fn execute_process_new_entries_and_exits(
         return Err(ContractError::Unauthorized {});
     }
 
+    // (redundant) check that no position is open
+    if JOIN_TIME.load(deps.storage)? != 0 {
+        return Err(ContractError::PositionOpen {});
+    }
+
     let addresses_waiting_for_exit = ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)?;
     let new_entries: Vec<(Addr, Vec<Coin>)> = ACCOUNTS_PENDING_ACTIVATION
         .range(deps.storage, None, None, Order::Ascending)
@@ -802,6 +807,8 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::VaultParticipants { start_after, limit } => {
             to_json_binary(&query_vault_participants(deps, start_after, limit))
         }
+        QueryMsg::NonVaultRewards {} => to_json_binary(&query_non_vault_rewards(deps)?),
+        QueryMsg::Status {} => to_json_binary(&query_status(deps)?),
     }
 }
 
@@ -926,6 +933,20 @@ fn query_vault_participants(
         .collect();
 
     VaultParticipantsResponse { vault_participants }
+}
+
+fn query_non_vault_rewards(deps: Deps) -> StdResult<Vec<Coin>> {
+    NON_VAULT_REWARDS.load(deps.storage)
+}
+
+fn query_status(deps: Deps) -> StdResult<Status> {
+    Ok(Status {
+        join_time: JOIN_TIME.load(deps.storage)?,
+        last_update: LAST_UPDATE.load(deps.storage)?,
+        cap_reached: CAP_REACHED.load(deps.storage)?,
+        halted: HALT_EXITS_AND_JOINS.load(deps.storage)?,
+        closed: VAULT_TERMINATED.load(deps.storage)?,
+    })
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]

@@ -75,7 +75,7 @@ pub enum ContractError {
     #[error("Can't remove position, age is less than min uptime")]
     MinUptime(),
 
-    #[error("Position already open")]
+    #[error("Open CL position found")]
     PositionOpen(),
 
     #[error("Address {} already whitelisted", address)]
