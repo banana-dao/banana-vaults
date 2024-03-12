@@ -202,7 +202,7 @@ pub fn execute(
         }
         ExecuteMsg::Halt {} => execute_halt(deps, info),
         ExecuteMsg::Resume {} => execute_resume(deps, info),
-        ExecuteMsg::CloseVault {} => execute_close_vault(deps, info),
+        ExecuteMsg::CloseVault {} => execute_close_vault(deps, env, info),
         ExecuteMsg::ForceExits {} => execute_force_exits(deps, env),
     }
 }
@@ -618,6 +618,8 @@ fn execute_withdraw_position(
     messages.push(msg_withdraw_position);
     attributes.push(attr("action", "banana_vault_withdraw_position"));
 
+    JOIN_TIME.save(deps.storage, &0)?;
+
     // operator will decide if we are to update users after the position is withdrawn
     if update_users.unwrap_or_default() {
         messages.push(
@@ -629,8 +631,6 @@ fn execute_withdraw_position(
             .into(),
         );
     }
-
-    JOIN_TIME.save(deps.storage, &0)?;
 
     Ok(Response::new()
         .add_messages(messages)
@@ -693,11 +693,18 @@ fn execute_resume(deps: DepsMut, info: MessageInfo) -> Result<Response, Contract
     Ok(Response::new().add_attribute("action", "banana_vault_resume"))
 }
 
-fn execute_close_vault(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
-    assert_owner(deps.storage, &info.sender)?;
+fn execute_close_vault(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    if info.sender != env.contract.address {
+        assert_owner(deps.storage, &info.sender)?;
+    }
+
     let config = CONFIG.load(deps.storage)?;
 
-    let mut messages = vec![];
+    let mut messages: Vec<CosmosMsg> = vec![];
 
     // We get all addresses that are waiting to join and send the funds back
 
@@ -717,7 +724,7 @@ fn execute_close_vault(deps: DepsMut, info: MessageInfo) -> Result<Response, Con
             amount: funds,
         };
 
-        messages.push(send_msg);
+        messages.push(send_msg.into());
     }
 
     // We get all addresses that are waiting to exit and add all the ones that are in the vault and are not waiting for exit
@@ -747,6 +754,17 @@ fn execute_close_vault(deps: DepsMut, info: MessageInfo) -> Result<Response, Con
     ADDRESSES_WAITING_FOR_EXIT.save(deps.storage, &addresses_waiting_for_exit)?;
     VAULT_TERMINATED.save(deps.storage, &true)?;
 
+    // if no position is open, we can trigger a user update here. otherwise the operator will have to do it when closing the position
+    if JOIN_TIME.load(deps.storage)? == 0 {
+        let update_users_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: info.sender.to_string(),
+            msg: to_json_binary(&ExecuteMsg::ProcessNewEntriesAndExits {})?,
+            funds: vec![],
+        });
+
+        messages.push(update_users_msg);
+    }
+
     Ok(Response::new()
         .add_messages(messages)
         .add_attribute("action", "banana_vault_terminate"))
@@ -763,28 +781,35 @@ fn execute_force_exits(deps: DepsMut, env: Env) -> Result<Response, ContractErro
     }
 
     let mut messages = vec![];
-    let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
-    let user_positions_response: UserPositionsResponse =
-        cl_querier.user_positions(env.contract.address.to_string(), config.pool_id, None)?;
 
-    for position in user_positions_response.positions.iter() {
-        let msg_withdraw_position: CosmosMsg = MsgWithdrawPosition {
-            position_id: position.position.as_ref().unwrap().position_id,
-            sender: env.contract.address.to_string(),
-            liquidity_amount: position.position.as_ref().unwrap().liquidity.to_owned(),
+    // if an open position exists, close it
+    if JOIN_TIME.load(deps.storage)? != 0 {
+        let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
+        let user_positions_response: UserPositionsResponse =
+            cl_querier.user_positions(env.contract.address.to_string(), config.pool_id, None)?;
+
+        for position in user_positions_response.positions.iter() {
+            let msg_withdraw_position: CosmosMsg = MsgWithdrawPosition {
+                position_id: position.position.as_ref().unwrap().position_id,
+                sender: env.contract.address.to_string(),
+                liquidity_amount: position.position.as_ref().unwrap().liquidity.to_owned(),
+            }
+            .into();
+
+            messages.push(msg_withdraw_position);
         }
-        .into();
 
-        messages.push(msg_withdraw_position);
+        JOIN_TIME.save(deps.storage, &0)?;
     }
 
-    let update_users_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+    // send a CloseVault message to the contract
+    let close_vault_msg = CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: env.contract.address.to_string(),
-        msg: to_json_binary(&ExecuteMsg::ProcessNewEntriesAndExits {})?,
+        msg: to_json_binary(&ExecuteMsg::CloseVault {})?,
         funds: vec![],
     });
 
-    messages.push(update_users_msg);
+    messages.push(close_vault_msg);
 
     Ok(Response::new()
         .add_messages(messages)
