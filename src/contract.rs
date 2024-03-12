@@ -1414,20 +1414,6 @@ fn process_entries_and_exits(
 
     non_vault_rewards.retain(|c| !c.amount.is_zero());
 
-    // If the vault is closed we send the dust left to the commission receiver
-    if VAULT_TERMINATED.load(deps.storage)? {
-        messages.push(
-            BankMsg::Send {
-                to_address: config.commission_receiver.to_string(),
-                amount: non_vault_rewards,
-            }
-            .into(),
-        );
-        non_vault_rewards = vec![];
-    }
-
-    NON_VAULT_REWARDS.save(deps.storage, &non_vault_rewards)?;
-
     for new_entry in &new_entries {
         let dollars_asset0 =
             current_price_asset0.checked_mul(Decimal::new(new_entry.1[0].amount))?;
@@ -1450,6 +1436,25 @@ fn process_entries_and_exits(
         &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
     )?;
     VAULT_RATIO.clear(deps.storage);
+
+    // if all addresses exited without closing the vault, terminate it here
+    if address_dollars_map.is_empty() {
+        VAULT_TERMINATED.save(deps.storage, &true)?;
+    }
+
+    // If the vault is closed we send the dust left to the commission receiver
+    if VAULT_TERMINATED.load(deps.storage)? {
+        messages.push(
+            BankMsg::Send {
+                to_address: config.commission_receiver.to_string(),
+                amount: non_vault_rewards,
+            }
+            .into(),
+        );
+        non_vault_rewards = vec![];
+    }
+
+    NON_VAULT_REWARDS.save(deps.storage, &non_vault_rewards)?;
 
     // Recalculate ratios
     for each_address in &address_dollars_map {
