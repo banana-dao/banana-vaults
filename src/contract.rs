@@ -1408,6 +1408,10 @@ fn process_entries_and_exits(
     // Recalculate ratios
     for each_address in &address_dollars_map {
         let ratio = each_address.1.checked_div(total_dollars_in_vault)?;
+        // prune zero ratio addresses. this may occur when an address owns a very tiny amount of assets
+        if ratio.is_zero() {
+            continue;
+        }
         VAULT_RATIO.save(deps.storage, each_address.0.to_owned(), &ratio)?;
     }
 
