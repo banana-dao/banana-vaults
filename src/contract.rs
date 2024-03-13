@@ -37,6 +37,9 @@ use std::{collections::HashMap, ops::Mul, str::FromStr};
 const CONTRACT_NAME: &str = env!("CARGO_PKG_NAME");
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+// incompatible versions, which should not be migrated from
+const INCOMPATIBLE_TAGS: [&str; 2] = ["0.1.0", "0.2.0"];
+
 const PYTH_TESTNET_CONTRACT_ADDRESS: &str =
     "osmo1hpdzqku55lmfmptpyj6wdlugqs5etr6teqf7r4yqjjrxjznjhtuqqu5kdh";
 const PYTH_MAINNET_CONTRACT_ADDRESS: &str =
@@ -999,6 +1002,11 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response
     let version = get_contract_version(deps.storage)?;
     if version.contract != CONTRACT_NAME {
         return Err(StdError::generic_err("Can only upgrade from same type"));
+    };
+    if INCOMPATIBLE_TAGS.contains(&version.version.as_str()) {
+        return Err(StdError::generic_err(
+            "Cannot upgrade from incompatible version",
+        ));
     }
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     Ok(Response::default())
