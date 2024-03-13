@@ -14,10 +14,6 @@ pub struct InstantiateMsg {
     pub image: Option<String>,
     // Must be a CL pool
     pub pool_id: u64,
-    // Update users frequency (adding users that want to join and removing users that want to leave), in seconds
-    pub min_update_frequency: Option<u64>,
-    // Interval after which ForceExits can be called, in seconds
-    pub max_update_frequency: Option<u64>,
     // Seconds after which a price quote is rejected and joins/leaves can't be processed
     pub price_expiry: u64,
     //  Uptime must be enforced to accurately calculate commission
@@ -81,6 +77,7 @@ pub enum ExecuteMsg {
     WithdrawPosition {
         position_id: u64,
         liquidity_amount: String,
+        update_users: Option<bool>,
     },
     // Process entries and exits (done internally by the contract every update frequency)
     ProcessNewEntriesAndExits {},
@@ -95,7 +92,7 @@ pub enum ExecuteMsg {
     Resume {},
     // Close vault. If this is triggered the vault will be closed, nobody else can join and all funds will be withdrawn and sent to the users during next update
     CloseVault {},
-    // Dead man switch
+    // Dead man switch. Can be called to close the vault and return all funds to the users after 14 days of inactivity
     ForceExits {},
 }
 
@@ -118,9 +115,6 @@ pub enum QueryMsg {
     // Tells you how much is pending join in total
     #[returns(TotalAssetsResponse)]
     TotalPendingAssets {},
-    // Checks if the contract can process new entries and exits
-    #[returns(bool)]
-    CanUpdate {},
     // Tells you how much of each vault asset is pending to join for an address
     #[returns(Vec<Coin>)]
     PendingJoin { address: Addr },
@@ -139,6 +133,12 @@ pub enum QueryMsg {
         start_after: Option<Addr>,
         limit: Option<u32>,
     },
+    #[returns(Vec<Coin>)]
+    UncompoundedRewards {},
+    #[returns(Vec<Coin>)]
+    CommissionRewards {},
+    #[returns(Status)]
+    Status {},
 }
 
 #[cw_serde]
@@ -161,6 +161,15 @@ pub struct VaultParticipantsResponse {
 pub struct VaultParticipant {
     pub address: Addr,
     pub ratio: Decimal,
+}
+
+#[cw_serde]
+pub struct Status {
+    pub join_time: u64,
+    pub last_update: u64,
+    pub cap_reached: bool,
+    pub halted: bool,
+    pub closed: bool,
 }
 
 #[cw_serde]

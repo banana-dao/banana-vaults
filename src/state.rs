@@ -13,12 +13,14 @@ pub enum TopKey {
     LastUpdate = b'c',
     AssetPendingActivation = b'd',
     AccountsPendingActivation = b'e',
-    NonVaultRewards = b'f',
-    AddressesWaitingForExit = b'g',
-    HaltExitsAndJoins = b'h',
-    CapReached = b'i',
-    VaultTerminated = b'j',
-    WhitelistedDepositors = b'k',
+    UncompoundedRewards = b'f',
+    CommissionRewards = b'g',
+    AddressesWaitingForExit = b'h',
+    HaltExitsAndJoins = b'i',
+    CapReached = b'j',
+    VaultTerminated = b'k',
+    WhitelistedDepositors = b'l',
+    JoinTime = b'm',
 }
 
 impl TopKey {
@@ -35,7 +37,7 @@ impl TopKey {
 pub const CONFIG: Item<Config> = Item::new(TopKey::Config.as_str());
 // Vault ratio that each address owns
 pub const VAULT_RATIO: Map<Addr, Decimal> = Map::new(TopKey::VaultRatio.as_str());
-// Last time the vault was updated (block height / time)
+// Last time exits and joins were processed
 pub const LAST_UPDATE: Item<u64> = Item::new(TopKey::LastUpdate.as_str());
 // Assets waiting to join the vault
 pub const ASSETS_PENDING_ACTIVATION: Item<Vec<Coin>> =
@@ -44,7 +46,9 @@ pub const ASSETS_PENDING_ACTIVATION: Item<Vec<Coin>> =
 pub const ACCOUNTS_PENDING_ACTIVATION: Map<Addr, Vec<Coin>> =
     Map::new(TopKey::AccountsPendingActivation.as_str());
 // collected rewards that are not asset0 or asset1
-pub const NON_VAULT_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::NonVaultRewards.as_str());
+pub const UNCOMPOUNDED_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::UncompoundedRewards.as_str());
+// collected commissions
+pub const COMMISSION_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::CommissionRewards.as_str());
 // Addresses pending to leave the vault
 pub const ADDRESSES_WAITING_FOR_EXIT: Item<Vec<Addr>> =
     Item::new(TopKey::AddressesWaitingForExit.as_str());
@@ -56,6 +60,8 @@ pub const CAP_REACHED: Item<bool> = Item::new(TopKey::CapReached.as_str());
 pub const VAULT_TERMINATED: Item<bool> = Item::new(TopKey::VaultTerminated.as_str());
 pub const WHITELISTED_DEPOSITORS: Map<Addr, Empty> =
     Map::new(TopKey::WhitelistedDepositors.as_str());
+// Time a position was last opened
+pub const JOIN_TIME: Item<u64> = Item::new(TopKey::JoinTime.as_str());
 
 #[cw_serde]
 pub struct Config {
@@ -69,8 +75,6 @@ pub struct Config {
     pub dollar_cap: Option<Uint128>,
     pub pyth_contract_address: Addr,
     pub price_expiry: u64,
-    pub min_update_frequency: u64,
-    pub max_update_frequency: u64,
     pub commission: Option<Decimal>,
     pub commission_receiver: Addr,
 }

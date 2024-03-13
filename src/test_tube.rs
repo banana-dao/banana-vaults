@@ -2,7 +2,7 @@ use crate::{
     msg::{
         ExecuteMsg::{CreatePosition, Join, Leave, ModifyConfig, WithdrawPosition},
         InstantiateMsg,
-        QueryMsg::{AccountsPendingExit, CanUpdate, TotalActiveAssets, VaultRatio},
+        QueryMsg::{AccountsPendingExit, TotalActiveAssets, VaultRatio},
         TotalAssetsResponse, VaultAsset,
     },
     state::Config,
@@ -213,10 +213,8 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
                 description: None,
                 image: None,
                 pool_id: 1,
-                min_update_frequency: None,
-                max_update_frequency: None,
                 price_expiry: 60,
-                min_uptime: Some(1),
+                min_uptime: None,
                 asset0: VaultAsset {
                     denom: "uosmo".to_string(),
                     price_identifier: PriceIdentifier::from_hex(
@@ -265,7 +263,7 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
                     description: None,
                     image: None,
                     pool_id: 1,
-                    min_uptime: Some(1),
+                    min_uptime: None,
                     asset0: VaultAsset {
                         denom: "uosmo".to_string(),
                         price_identifier: PriceIdentifier::from_hex(
@@ -283,8 +281,6 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
                         "osmo1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqmcn030",
                     ),
                     price_expiry: 60,
-                    min_update_frequency: 600,
-                    max_update_frequency: 86400,
                 }),
             },
             &[],
@@ -427,7 +423,7 @@ fn create_position(test_env: &TestEnv, modules: &Modules) {
         .unwrap();
 }
 
-fn withdraw_position(test_env: &TestEnv, modules: &Modules) {
+fn withdraw_position(update: bool, test_env: &TestEnv, modules: &Modules) {
     let position = modules
         .cl
         .query_user_positions(&UserPositionsRequest {
@@ -448,6 +444,7 @@ fn withdraw_position(test_env: &TestEnv, modules: &Modules) {
             &WithdrawPosition {
                 position_id: position.position_id,
                 liquidity_amount: position.liquidity,
+                update_users: Some(update),
             },
             &[],
             &test_env.admin,
@@ -455,21 +452,15 @@ fn withdraw_position(test_env: &TestEnv, modules: &Modules) {
         .unwrap();
 }
 
+// withdraw and create position to trigger ratio calculation
 fn cycle_positions(test_env: &TestEnv, modules: &Modules, exit: bool) {
     create_position(test_env, modules);
-    // increase time to allow joins
-    test_env.app.increase_time(601);
-
-    // withdraw and create position to trigger ratio calculation
-    withdraw_position(test_env, modules);
+    withdraw_position(true, test_env, modules);
     create_position(test_env, modules);
-
-    // increase time again and trigger exits
-    test_env.app.increase_time(601);
     if exit {
         execute_leaves(test_env, modules);
     }
-    withdraw_position(test_env, modules);
+    withdraw_position(true, test_env, modules);
 }
 
 #[test]
@@ -799,23 +790,6 @@ fn test_queries() {
     );
 
     cycle_positions(&test_env, &modules, false);
-
-    // tests CanUpdate query
-    let can_update: bool = modules
-        .wasm
-        .query(&test_env.contract_addr, &CanUpdate {})
-        .unwrap();
-
-    assert!(!can_update);
-
-    test_env.app.increase_time(601);
-
-    let can_update: bool = modules
-        .wasm
-        .query(&test_env.contract_addr, &CanUpdate {})
-        .unwrap();
-
-    assert!(can_update);
 
     modules
         .wasm
