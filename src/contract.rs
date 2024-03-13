@@ -42,8 +42,8 @@ const PYTH_TESTNET_CONTRACT_ADDRESS: &str =
 const PYTH_MAINNET_CONTRACT_ADDRESS: &str =
     "osmo13ge29x4e2s63a8ytz2px8gurtyznmue4a69n5275692v3qn3ks8q7cwck7";
 
-// Sensible defaults for update frequency
-const DEFAULT_MAX_UPDATE_FREQUENCY: u64 = 86400 * 14; // 14 days
+// The maximum amount of time that can pass between updates, before the dead man switch is active
+const MAX_UPDATE_INTERVAL: u64 = 86400 * 14; // 14 days
 
 // Pagination
 const MAX_PAGE_LIMIT: u32 = 250;
@@ -99,9 +99,6 @@ pub fn instantiate(
         dollar_cap: msg.dollar_cap,
         pyth_contract_address: Addr::unchecked(pyth_contract_address),
         price_expiry: msg.price_expiry,
-        max_update_frequency: msg
-            .max_update_frequency
-            .unwrap_or(DEFAULT_MAX_UPDATE_FREQUENCY),
         commission: msg.commission,
         commission_receiver: msg.commission_receiver.unwrap_or(info.sender.to_owned()),
     };
@@ -778,9 +775,9 @@ fn execute_force_exits(deps: DepsMut, env: Env) -> Result<Response, ContractErro
     let last_update = LAST_UPDATE.load(deps.storage)?;
     let config = CONFIG.load(deps.storage)?;
 
-    if env.block.time.seconds() < last_update + config.max_update_frequency {
+    if env.block.time.seconds() < last_update + MAX_UPDATE_INTERVAL {
         return Err(ContractError::CantForceExitsYet {
-            seconds: last_update + config.max_update_frequency - env.block.time.seconds(),
+            seconds: last_update + MAX_UPDATE_INTERVAL - env.block.time.seconds(),
         });
     }
 
@@ -792,16 +789,25 @@ fn execute_force_exits(deps: DepsMut, env: Env) -> Result<Response, ContractErro
         let user_positions_response: UserPositionsResponse =
             cl_querier.user_positions(env.contract.address.to_string(), config.pool_id, None)?;
 
-        for position in user_positions_response.positions.iter() {
-            let msg_withdraw_position: CosmosMsg = MsgWithdrawPosition {
-                position_id: position.position.as_ref().unwrap().position_id,
-                sender: env.contract.address.to_string(),
-                liquidity_amount: position.position.as_ref().unwrap().liquidity.to_owned(),
-            }
-            .into();
+        let position = user_positions_response.positions[0]
+            .position
+            .as_ref()
+            .unwrap();
 
-            messages.push(msg_withdraw_position);
+        collect_rewards(
+            &deps,
+            env.contract.address.to_string(),
+            position.position_id,
+        )?;
+
+        let msg_withdraw_position: CosmosMsg = MsgWithdrawPosition {
+            position_id: position.position_id,
+            sender: env.contract.address.to_string(),
+            liquidity_amount: position.liquidity.clone(),
         }
+        .into();
+
+        messages.push(msg_withdraw_position);
 
         JOIN_TIME.save(deps.storage, &0)?;
     }
@@ -854,11 +860,11 @@ fn query_total_active_assets(deps: Deps, env: Env) -> StdResult<TotalAssetsRespo
 
     let (mut asset0, mut asset1) = get_available_balances(&deps, &address)?;
 
-    let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
-    for position in &cl_querier
-        .user_positions(address.clone(), config.pool_id, None)?
-        .positions
-    {
+    if JOIN_TIME.load(deps.storage)? != 0 {
+        let position = &ConcentratedliquidityQuerier::new(&deps.querier)
+            .user_positions(address, config.pool_id, None)?
+            .positions[0];
+
         asset0.amount = asset0.amount.checked_add(
             position
                 .asset0
@@ -1111,7 +1117,7 @@ fn ensure_uptime(deps: &DepsMut, env: &Env) -> Result<(), ContractError> {
     }
 }
 
-// These are all the assets the vault has that are not pending to join
+// Asset0 and Asset1 liquid in the vault, minus pending assets and commissions
 fn get_available_balances(deps: &Deps, address: &String) -> Result<(Coin, Coin), StdError> {
     let config = CONFIG.load(deps.storage)?;
     let balance_asset0 = deps
@@ -1122,12 +1128,14 @@ fn get_available_balances(deps: &Deps, address: &String) -> Result<(Coin, Coin),
         .query_balance(address, config.asset1.denom.to_owned())?;
 
     let assets_pending = ASSETS_PENDING_ACTIVATION.load(deps.storage)?;
+    let commissions = COMMISSION_REWARDS.load(deps.storage)?;
 
     Ok((
         coin(
             balance_asset0
                 .amount
                 .checked_sub(assets_pending[0].amount)?
+                .checked_sub(commissions[0].amount)?
                 .u128(),
             config.asset0.denom.to_owned(),
         ),
@@ -1135,6 +1143,7 @@ fn get_available_balances(deps: &Deps, address: &String) -> Result<(Coin, Coin),
             balance_asset1
                 .amount
                 .checked_sub(assets_pending[1].amount)?
+                .checked_sub(commissions[1].amount)?
                 .u128(),
             config.asset1.denom.to_owned(),
         ),
@@ -1353,26 +1362,27 @@ fn process_entries_and_exits(
     let mut uncompounded_rewards: Vec<Coin> = UNCOMPOUNDED_REWARDS.load(deps.storage)?;
 
     // add the uncompounded commission to the rest of the commission and deduct them from the rewards
-    if let Some(commission) = config.commission {
-        let mut commission_rewards = COMMISSION_REWARDS.load(deps.storage)?;
-        let mut updated_rewards = vec![];
+    let commission_rate = config.commission.unwrap_or(Decimal::zero());
+    let mut commission_rewards = COMMISSION_REWARDS.load(deps.storage)?;
+    let mut updated_rewards = vec![];
 
-        for reward in uncompounded_rewards {
-            let commission_amount = reward.amount.mul_floor(commission);
+    for reward in uncompounded_rewards {
+        let commission_amount = reward.amount.mul_floor(commission_rate);
 
-            commission_rewards.push(Coin {
-                amount: commission_amount,
-                denom: reward.denom.clone(),
-            });
+        commission_rewards.push(Coin {
+            amount: commission_amount,
+            denom: reward.denom.clone(),
+        });
 
-            updated_rewards.push(Coin {
-                amount: reward.amount.checked_sub(commission_amount)?,
-                denom: reward.denom,
-            });
-        }
+        updated_rewards.push(Coin {
+            amount: reward.amount.checked_sub(commission_amount)?,
+            denom: reward.denom,
+        });
+    }
 
-        commission_rewards.retain(|f| f.amount.ne(&Uint128::zero()));
+    commission_rewards.retain(|f| f.amount.ne(&Uint128::zero()));
 
+    if !commission_rewards.is_empty() {
         messages.push(
             BankMsg::Send {
                 to_address: config.commission_receiver.to_string(),
@@ -1380,17 +1390,18 @@ fn process_entries_and_exits(
             }
             .into(),
         );
-
-        COMMISSION_REWARDS.save(
-            deps.storage,
-            &vec![
-                coin(0, config.asset0.denom.clone()),
-                coin(0, config.asset1.denom.clone()),
-            ],
-        )?;
-
-        uncompounded_rewards = updated_rewards;
     }
+
+    COMMISSION_REWARDS.save(
+        deps.storage,
+        &vec![
+            coin(0, config.asset0.denom.clone()),
+            coin(0, config.asset1.denom.clone()),
+        ],
+    )?;
+
+    uncompounded_rewards = updated_rewards;
+    //}
 
     let mut distributed_non_vault_rewards = Coins::default();
 

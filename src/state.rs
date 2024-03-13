@@ -75,7 +75,6 @@ pub struct Config {
     pub dollar_cap: Option<Uint128>,
     pub pyth_contract_address: Addr,
     pub price_expiry: u64,
-    pub max_update_frequency: u64,
     pub commission: Option<Decimal>,
     pub commission_receiver: Addr,
 }

@@ -213,7 +213,6 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
                 description: None,
                 image: None,
                 pool_id: 1,
-                max_update_frequency: None,
                 price_expiry: 60,
                 min_uptime: None,
                 asset0: VaultAsset {
@@ -282,7 +281,6 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
                         "osmo1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqmcn030",
                     ),
                     price_expiry: 60,
-                    max_update_frequency: 86400,
                 }),
             },
             &[],

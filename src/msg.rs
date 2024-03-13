@@ -14,8 +14,6 @@ pub struct InstantiateMsg {
     pub image: Option<String>,
     // Must be a CL pool
     pub pool_id: u64,
-    // Interval after which ForceExits can be called, in seconds
-    pub max_update_frequency: Option<u64>,
     // Seconds after which a price quote is rejected and joins/leaves can't be processed
     pub price_expiry: u64,
     //  Uptime must be enforced to accurately calculate commission
@@ -94,7 +92,7 @@ pub enum ExecuteMsg {
     Resume {},
     // Close vault. If this is triggered the vault will be closed, nobody else can join and all funds will be withdrawn and sent to the users during next update
     CloseVault {},
-    // Dead man switch
+    // Dead man switch. Can be called to close the vault and return all funds to the users after 14 days of inactivity
     ForceExits {},
 }
 
