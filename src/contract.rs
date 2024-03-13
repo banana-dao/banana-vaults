@@ -654,17 +654,16 @@ fn execute_withdraw_position(
         .add_attributes(attributes))
 }
 
-// This can only be done by contract internally
 fn execute_process_new_entries_and_exits(
     deps: DepsMut,
     env: &Env,
     info: &MessageInfo,
 ) -> Result<Response, ContractError> {
     if info.sender != env.contract.address {
-        return Err(ContractError::Unauthorized {});
+        assert_owner(deps.storage, &info.sender)?;
     }
 
-    // (redundant) check that no position is open
+    // check that no position is open
     if JOIN_TIME.load(deps.storage)? != 0 {
         return Err(ContractError::PositionOpen {});
     }
