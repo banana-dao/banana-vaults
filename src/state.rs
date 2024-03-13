@@ -13,13 +13,14 @@ pub enum TopKey {
     LastUpdate = b'c',
     AssetPendingActivation = b'd',
     AccountsPendingActivation = b'e',
-    NonVaultRewards = b'f',
-    AddressesWaitingForExit = b'g',
-    HaltExitsAndJoins = b'h',
-    CapReached = b'i',
-    VaultTerminated = b'j',
-    WhitelistedDepositors = b'k',
-    JoinTime = b'l',
+    UncompoundedRewards = b'f',
+    CommissionRewards = b'g',
+    AddressesWaitingForExit = b'h',
+    HaltExitsAndJoins = b'i',
+    CapReached = b'j',
+    VaultTerminated = b'k',
+    WhitelistedDepositors = b'l',
+    JoinTime = b'm',
 }
 
 impl TopKey {
@@ -45,7 +46,9 @@ pub const ASSETS_PENDING_ACTIVATION: Item<Vec<Coin>> =
 pub const ACCOUNTS_PENDING_ACTIVATION: Map<Addr, Vec<Coin>> =
     Map::new(TopKey::AccountsPendingActivation.as_str());
 // collected rewards that are not asset0 or asset1
-pub const NON_VAULT_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::NonVaultRewards.as_str());
+pub const UNCOMPOUNDED_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::UncompoundedRewards.as_str());
+// collected commissions
+pub const COMMISSION_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::CommissionRewards.as_str());
 // Addresses pending to leave the vault
 pub const ADDRESSES_WAITING_FOR_EXIT: Item<Vec<Addr>> =
     Item::new(TopKey::AddressesWaitingForExit.as_str());

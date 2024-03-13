@@ -136,7 +136,9 @@ pub enum QueryMsg {
         limit: Option<u32>,
     },
     #[returns(Vec<Coin>)]
-    NonVaultRewards {},
+    UncompoundedRewards {},
+    #[returns(Vec<Coin>)]
+    CommissionRewards {},
     #[returns(Status)]
     Status {},
 }
