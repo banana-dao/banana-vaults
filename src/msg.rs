@@ -81,6 +81,8 @@ pub enum ExecuteMsg {
     },
     // Process entries and exits (done internally by the contract every update frequency)
     ProcessNewEntriesAndExits {},
+    // Claim collected commission
+    ClaimCommission {},
     // Join vault
     Join {},
     // Leave vault. If no address is specified, the sender will be removed. only the operator can remove other addresses

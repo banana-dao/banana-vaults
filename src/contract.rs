@@ -215,6 +215,7 @@ pub fn execute(
         ExecuteMsg::ProcessNewEntriesAndExits {} => {
             execute_process_new_entries_and_exits(deps, &env, &info)
         }
+        ExecuteMsg::ClaimCommission {} => execute_claim_commission(deps, &info),
         ExecuteMsg::Halt {} => execute_halt(deps, &info),
         ExecuteMsg::Resume {} => execute_resume(deps, &info),
         ExecuteMsg::CloseVault {} => execute_close_vault(deps, &env, &info),
@@ -687,6 +688,14 @@ fn execute_process_new_entries_and_exits(
     } else {
         Ok(Response::default())
     }
+}
+
+fn execute_claim_commission(deps: DepsMut, info: &MessageInfo) -> Result<Response, ContractError> {
+    assert_owner(deps.storage, &info.sender)?;
+
+    Ok(Response::new()
+        .add_messages(claim_commissions(deps)?)
+        .add_attribute("action", "banana_vault_claim_commission"))
 }
 
 fn execute_halt(deps: DepsMut, info: &MessageInfo) -> Result<Response, ContractError> {
@@ -1242,9 +1251,7 @@ fn collect_rewards(
     let commission_rate = config.commission.unwrap_or(Decimal::zero());
 
     for reward_coin in &reward_coins {
-        let commission_amount = reward_coin
-            .amount
-            .mul_floor(commission_rate);
+        let commission_amount = reward_coin.amount.mul_floor(commission_rate);
 
         // compoundable rewards. add commission to the tracker
         if reward_coin.denom == config.asset0.denom {
@@ -1321,6 +1328,101 @@ fn prepare_swap(
     ))
 }
 
+fn claim_commissions(deps: DepsMut) -> Result<Vec<CosmosMsg>, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+
+    let ratios: Vec<(Addr, Decimal)> = VAULT_RATIO
+        .range(deps.storage, None, None, Order::Ascending)
+        .filter_map(Result::ok)
+        .collect();
+
+    let commission_rate = config.commission.unwrap_or(Decimal::zero());
+    let mut commission_rewards = COMMISSION_REWARDS.load(deps.storage)?;
+    let mut uncompounded_rewards = UNCOMPOUNDED_REWARDS.load(deps.storage)?;
+
+    let mut messages = vec![];
+    let mut updated_rewards = vec![];
+
+    for reward in uncompounded_rewards {
+        let commission_amount = reward.amount.mul_floor(commission_rate);
+
+        commission_rewards.push(Coin {
+            amount: commission_amount,
+            denom: reward.denom.clone(),
+        });
+
+        updated_rewards.push(Coin {
+            amount: reward.amount.checked_sub(commission_amount)?,
+            denom: reward.denom,
+        });
+    }
+
+    commission_rewards.retain(|f| f.amount.ne(&Uint128::zero()));
+
+    if !commission_rewards.is_empty() {
+        messages.push(
+            BankMsg::Send {
+                to_address: config.commission_receiver.to_string(),
+                amount: commission_rewards,
+            }
+            .into(),
+        );
+    }
+
+    uncompounded_rewards = updated_rewards;
+
+    let mut distributed_non_vault_rewards = Coins::default();
+
+    for (address, ratio) in &ratios {
+        // get the non vault rewards for each address
+        let rewards: Vec<Coin> = uncompounded_rewards
+            .iter()
+            .map(|c| {
+                let amount = c.amount.mul_floor(*ratio);
+                coin(amount.u128(), &c.denom)
+            })
+            .filter(|c| !c.amount.is_zero())
+            .map(|c| {
+                distributed_non_vault_rewards.add(c.clone()).unwrap();
+                c
+            })
+            .collect();
+
+        if !rewards.is_empty() {
+            messages.push(
+                BankMsg::Send {
+                    to_address: address.to_string(),
+                    amount: rewards,
+                }
+                .into(),
+            );
+        }
+    }
+
+    // Reduce all non vault rewards by the total amount sent
+    for each_non_vault_reward in &mut uncompounded_rewards {
+        each_non_vault_reward.amount = each_non_vault_reward.amount.checked_sub(
+            distributed_non_vault_rewards
+                .iter()
+                .find(|c| c.denom == each_non_vault_reward.denom)
+                .map(|c| c.amount)
+                .unwrap_or_default(),
+        )?;
+    }
+
+    uncompounded_rewards.retain(|c| !c.amount.is_zero());
+    UNCOMPOUNDED_REWARDS.save(deps.storage, &uncompounded_rewards)?;
+    COMMISSION_REWARDS.save(
+        deps.storage,
+        &vec![
+            coin(0, config.asset0.denom.clone()),
+            coin(0, config.asset1.denom.clone()),
+        ],
+    )?;
+
+    Ok(messages)
+}
+
 fn process_entries_and_exits(
     deps: DepsMut,
     env: &Env,
@@ -1394,28 +1496,12 @@ fn process_entries_and_exits(
         });
     }
 
-    commission_rewards.retain(|f| f.amount.ne(&Uint128::zero()));
-
-    if !commission_rewards.is_empty() {
-        messages.push(
-            BankMsg::Send {
-                to_address: config.commission_receiver.to_string(),
-                amount: commission_rewards,
-            }
-            .into(),
-        );
-    }
-
-    COMMISSION_REWARDS.save(
-        deps.storage,
-        &vec![
-            coin(0, config.asset0.denom.clone()),
-            coin(0, config.asset1.denom.clone()),
-        ],
-    )?;
-
     uncompounded_rewards = updated_rewards;
 
+    let mut distributed_vault_tokens = vec![
+        coin(0, config.asset0.denom.clone()),
+        coin(0, config.asset1.denom.clone()),
+    ];
     let mut distributed_non_vault_rewards = Coins::default();
 
     for (address, ratio) in &ratios {
@@ -1442,18 +1528,16 @@ fn process_entries_and_exits(
             let amount_to_send_asset0 = available_asset0.amount.mul_floor(*ratio);
             let amount_to_send_asset1 = available_asset1.amount.mul_floor(*ratio);
 
-            if amount_to_send_asset0.gt(&Uint128::zero()) {
-                amounts_send_msg.push(coin(
-                    amount_to_send_asset0.u128(),
-                    config.asset0.denom.clone(),
-                ));
+            if amount_to_send_asset0 > Uint128::zero() {
+                let coin_asset0 = coin(amount_to_send_asset0.u128(), config.asset0.denom.clone());
+                distributed_vault_tokens[0].amount += coin_asset0.amount;
+                amounts_send_msg.push(coin_asset0);
             }
 
-            if amount_to_send_asset1.gt(&Uint128::zero()) {
-                amounts_send_msg.push(coin(
-                    amount_to_send_asset1.u128(),
-                    config.asset1.denom.clone(),
-                ));
+            if amount_to_send_asset1 > Uint128::zero() {
+                let coin_asset1 = coin(amount_to_send_asset1.u128(), config.asset1.denom.clone());
+                distributed_vault_tokens[1].amount += coin_asset1.amount;
+                amounts_send_msg.push(coin_asset1);
             }
         } else {
             // if not, collect the dollar amounts to recaulculate the vault ratios
@@ -1524,7 +1608,10 @@ fn process_entries_and_exits(
     ACCOUNTS_PENDING_ACTIVATION.clear(deps.storage);
     ASSETS_PENDING_ACTIVATION.save(
         deps.storage,
-        &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
+        &vec![
+            coin(0, config.asset0.denom.clone()),
+            coin(0, config.asset1.denom.clone()),
+        ],
     )?;
     VAULT_RATIO.clear(deps.storage);
 
@@ -1535,15 +1622,41 @@ fn process_entries_and_exits(
 
     // If the vault is closed we send the dust left to the commission receiver
     if VAULT_TERMINATED.load(deps.storage)? {
+        let mut commission_rewards_coins =
+            Coins::try_from(commission_rewards.clone()).unwrap_or_default();
+
+        commission_rewards_coins.add(coin(
+            (available_asset0.amount - distributed_vault_tokens[0].amount).u128(),
+            config.asset0.denom.clone(),
+        ))?;
+        commission_rewards_coins.add(coin(
+            (available_asset1.amount - distributed_vault_tokens[1].amount).u128(),
+            config.asset1.denom.clone(),
+        ))?;
+        for each_non_vault_reward in &uncompounded_rewards {
+            commission_rewards_coins.add(each_non_vault_reward.clone())?;
+        }
+
+        commission_rewards = commission_rewards_coins.into();
+        uncompounded_rewards = vec![];
+    }
+
+    commission_rewards.retain(|f| f.amount.ne(&Uint128::zero()));
+
+    if !commission_rewards.is_empty() {
         messages.push(
             BankMsg::Send {
                 to_address: config.commission_receiver.to_string(),
-                amount: uncompounded_rewards,
+                amount: commission_rewards,
             }
             .into(),
         );
-        uncompounded_rewards = vec![];
     }
+
+    COMMISSION_REWARDS.save(
+        deps.storage,
+        &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
+    )?;
 
     UNCOMPOUNDED_REWARDS.save(deps.storage, &uncompounded_rewards)?;
 
