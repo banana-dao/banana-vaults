@@ -1239,18 +1239,20 @@ fn collect_rewards(
     let mut uncompounded_rewards: Coins =
         Coins::try_from(UNCOMPOUNDED_REWARDS.load(deps.storage)?).unwrap_or_default();
 
+    let commission_rate = config.commission.unwrap_or(Decimal::zero());
+
     for reward_coin in &reward_coins {
         let commission_amount = reward_coin
             .amount
-            .mul_floor(config.commission.unwrap_or(Decimal::zero()));
+            .mul_floor(commission_rate);
 
-        // compoundable rewards, minus commission
+        // compoundable rewards. add commission to the tracker
         if reward_coin.denom == config.asset0.denom {
             commission_coins[0].amount += commission_amount;
-            amount0 = reward_coin.amount.checked_sub(commission_amount)?;
+            amount0 = reward_coin.amount
         } else if reward_coin.denom == config.asset1.denom {
             commission_coins[1].amount += commission_amount;
-            amount1 = reward_coin.amount.checked_sub(commission_amount)?;
+            amount1 = reward_coin.amount
 
         // uncompounded rewards. commission will be deducted when the rewards are distributed
         } else {
