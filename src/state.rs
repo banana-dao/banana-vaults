@@ -20,8 +20,7 @@ pub enum TopKey {
     CapReached = b'j',
     VaultTerminated = b'k',
     WhitelistedDepositors = b'l',
-    JoinTime = b'm',
-    PositionOpen = b'n',
+    PositionOpen = b'm',
 }
 
 impl TopKey {
@@ -61,8 +60,6 @@ pub const CAP_REACHED: Item<bool> = Item::new(TopKey::CapReached.as_str());
 pub const VAULT_TERMINATED: Item<bool> = Item::new(TopKey::VaultTerminated.as_str());
 pub const WHITELISTED_DEPOSITORS: Map<Addr, Empty> =
     Map::new(TopKey::WhitelistedDepositors.as_str());
-// Key maintained for backward compatibility
-pub const JOIN_TIME: Item<u64> = Item::new(TopKey::JoinTime.as_str());
 // Flag to indicate if the vault has an active position
 pub const POSITION_OPEN: Item<bool> = Item::new(TopKey::PositionOpen.as_str());
 

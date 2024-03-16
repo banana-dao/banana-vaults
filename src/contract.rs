@@ -6,8 +6,8 @@ use crate::{
     },
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
-        CAP_REACHED, COMMISSION_REWARDS, CONFIG, HALT_EXITS_AND_JOINS, JOIN_TIME, LAST_UPDATE,
-        POSITION_OPEN, UNCOMPOUNDED_REWARDS, VAULT_RATIO, VAULT_TERMINATED, WHITELISTED_DEPOSITORS,
+        CAP_REACHED, COMMISSION_REWARDS, CONFIG, HALT_EXITS_AND_JOINS, LAST_UPDATE, POSITION_OPEN,
+        UNCOMPOUNDED_REWARDS, VAULT_RATIO, VAULT_TERMINATED, WHITELISTED_DEPOSITORS,
     },
 };
 use cosmwasm_std::{
@@ -38,7 +38,7 @@ const CONTRACT_NAME: &str = env!("CARGO_PKG_NAME");
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // incompatible versions, which should not be migrated from
-const INCOMPATIBLE_TAGS: [&str; 2] = ["0.1.0", "0.2.0"];
+const INCOMPATIBLE_TAGS: [&str; 3] = ["0.1.0", "0.2.0", "0.3.0"];
 
 const PYTH_TESTNET_CONTRACT_ADDRESS: &str =
     "osmo1hpdzqku55lmfmptpyj6wdlugqs5etr6teqf7r4yqjjrxjznjhtuqqu5kdh";
@@ -1060,14 +1060,6 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response
         ));
     }
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-
-    // convert JOIN_TIME to POSITION_OPEN then uninitialize it
-    if JOIN_TIME.load(deps.storage)? != 0 {
-        POSITION_OPEN.save(deps.storage, &true)?;
-    } else {
-        POSITION_OPEN.save(deps.storage, &false)?;
-    }
-    JOIN_TIME.remove(deps.storage);
 
     Ok(Response::default())
 }
