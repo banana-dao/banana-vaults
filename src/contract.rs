@@ -1234,6 +1234,8 @@ fn collect_rewards(
     let mut messages: Vec<CosmosMsg> = vec![];
     let mut attributes: Vec<Attribute> = vec![];
 
+    // if there's forfeited incentives in the response, min uptime for that incentive has yet not been met.
+    // can be overridden by the operator to allow forfeiture if repositioning is more advantageous
     if !position.forfeited_incentives.is_empty() && !override_uptime {
         return Err(ContractError::MinUptime());
     }
