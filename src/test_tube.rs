@@ -214,7 +214,6 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
                 image: None,
                 pool_id: 1,
                 price_expiry: 60,
-                min_uptime: None,
                 asset0: VaultAsset {
                     denom: "uosmo".to_string(),
                     price_identifier: PriceIdentifier::from_hex(
@@ -263,7 +262,6 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
                     description: None,
                     image: None,
                     pool_id: 1,
-                    min_uptime: None,
                     asset0: VaultAsset {
                         denom: "uosmo".to_string(),
                         price_identifier: PriceIdentifier::from_hex(
@@ -445,6 +443,7 @@ fn withdraw_position(update: bool, test_env: &TestEnv, modules: &Modules) {
                 position_id: position.position_id,
                 liquidity_amount: position.liquidity,
                 update_users: Some(update),
+                override_uptime: None,
             },
             &[],
             &test_env.admin,

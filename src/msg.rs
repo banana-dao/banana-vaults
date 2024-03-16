@@ -16,8 +16,6 @@ pub struct InstantiateMsg {
     pub pool_id: u64,
     // Seconds after which a price quote is rejected and joins/leaves can't be processed
     pub price_expiry: u64,
-    //  Uptime must be enforced to accurately calculate commission
-    pub min_uptime: Option<u64>,
     // CL Assets with their corresponding pyth price feed
     pub asset0: VaultAsset,
     pub asset1: VaultAsset,
@@ -72,12 +70,14 @@ pub enum ExecuteMsg {
         token_min_amount0: String,
         token_min_amount1: String,
         swap: Option<Swap>,
+        override_uptime: Option<bool>,
     },
     // Withdraw position
     WithdrawPosition {
         position_id: u64,
         liquidity_amount: String,
         update_users: Option<bool>,
+        override_uptime: Option<bool>,
     },
     // Process entries and exits (done internally by the contract every update frequency)
     ProcessNewEntriesAndExits {},
@@ -169,6 +169,7 @@ pub struct VaultParticipant {
 pub struct Status {
     pub join_time: u64,
     pub last_update: u64,
+    pub uptime_locked: bool,
     pub cap_reached: bool,
     pub halted: bool,
     pub closed: bool,
