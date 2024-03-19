@@ -6,7 +6,7 @@ use crate::{
     },
     state::{
         Config, ACCOUNTS_PENDING_ACTIVATION, ADDRESSES_WAITING_FOR_EXIT, ASSETS_PENDING_ACTIVATION,
-        CAP_REACHED, COMMISSION_REWARDS, CONFIG, HALT_EXITS_AND_JOINS, JOIN_TIME, LAST_UPDATE,
+        CAP_REACHED, COMMISSION_REWARDS, CONFIG, HALT_EXITS_AND_JOINS, LAST_UPDATE, POSITION_OPEN,
         UNCOMPOUNDED_REWARDS, VAULT_RATIO, VAULT_TERMINATED, WHITELISTED_DEPOSITORS,
     },
 };
@@ -38,7 +38,7 @@ const CONTRACT_NAME: &str = env!("CARGO_PKG_NAME");
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // incompatible versions, which should not be migrated from
-const INCOMPATIBLE_TAGS: [&str; 2] = ["0.1.0", "0.2.0"];
+const INCOMPATIBLE_TAGS: [&str; 3] = ["0.1.0", "0.2.0", "0.3.0"];
 
 const PYTH_TESTNET_CONTRACT_ADDRESS: &str =
     "osmo1hpdzqku55lmfmptpyj6wdlugqs5etr6teqf7r4yqjjrxjznjhtuqqu5kdh";
@@ -98,7 +98,6 @@ pub fn instantiate(
         pool_id: msg.pool_id,
         asset0: msg.asset0,
         asset1: msg.asset1,
-        min_uptime: msg.min_uptime,
         dollar_cap: msg.dollar_cap,
         pyth_contract_address: Addr::unchecked(pyth_contract_address),
         price_expiry: msg.price_expiry,
@@ -142,7 +141,7 @@ pub fn instantiate(
         &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
     )?;
 
-    JOIN_TIME.save(deps.storage, &0)?;
+    POSITION_OPEN.save(deps.storage, &false)?;
 
     Ok(Response::new()
         .add_attribute("action", "banana_vault_instantiate")
@@ -189,6 +188,7 @@ pub fn execute(
             token_min_amount0,
             token_min_amount1,
             swap,
+            override_uptime,
         } => execute_add_to_position(
             deps,
             env,
@@ -199,11 +199,13 @@ pub fn execute(
             token_min_amount0,
             token_min_amount1,
             swap,
+            override_uptime,
         ),
         ExecuteMsg::WithdrawPosition {
             position_id,
             liquidity_amount,
             update_users,
+            override_uptime,
         } => execute_withdraw_position(
             deps,
             &env,
@@ -211,10 +213,12 @@ pub fn execute(
             position_id,
             liquidity_amount,
             update_users,
+            override_uptime,
         ),
         ExecuteMsg::ProcessNewEntriesAndExits {} => {
             execute_process_new_entries_and_exits(deps, &env, &info)
         }
+        ExecuteMsg::ClaimCommission {} => execute_claim_commission(deps, &info),
         ExecuteMsg::Halt {} => execute_halt(deps, &info),
         ExecuteMsg::Resume {} => execute_resume(deps, &info),
         ExecuteMsg::CloseVault {} => execute_close_vault(deps, &env, &info),
@@ -460,7 +464,7 @@ fn execute_create_position(
     assert_owner(deps.storage, &info.sender)?;
     let config = CONFIG.load(deps.storage)?;
 
-    if JOIN_TIME.load(deps.storage)? != 0 {
+    if POSITION_OPEN.load(deps.storage)? {
         return Err(ContractError::PositionOpen {});
     }
 
@@ -514,7 +518,7 @@ fn execute_create_position(
 
     attributes.push(attr("action", "banana_vault_create_position"));
 
-    JOIN_TIME.save(deps.storage, &env.block.time.seconds())?;
+    POSITION_OPEN.save(deps.storage, &true)?;
 
     Ok(Response::new()
         .add_messages(messages)
@@ -532,11 +536,9 @@ fn execute_add_to_position(
     token_min_amount0: String,
     token_min_amount1: String,
     swap: Option<Swap>,
+    override_uptime: Option<bool>,
 ) -> Result<Response, ContractError> {
     assert_owner(deps.storage, &info.sender)?;
-
-    // since add to position actually creates a new position
-    ensure_uptime(&deps, &env)?;
 
     let config = CONFIG.load(deps.storage)?;
 
@@ -552,7 +554,12 @@ fn execute_add_to_position(
         .query_balance(contract_address.clone(), config.asset1.denom.clone())?;
 
     // Collect rewards instead of letting them be claimed when adding to position
-    let rewards = collect_rewards(&deps, contract_address.to_string(), position_id)?;
+    let rewards = collect_rewards(
+        &deps,
+        contract_address.to_string(),
+        position_id,
+        override_uptime.unwrap_or_default(),
+    )?;
 
     UNCOMPOUNDED_REWARDS.save(deps.storage, &rewards.non_vault)?;
     COMMISSION_REWARDS.save(deps.storage, &rewards.commission)?;
@@ -613,14 +620,19 @@ fn execute_withdraw_position(
     position_id: u64,
     liquidity_amount: String,
     update_users: Option<bool>,
+    override_uptime: Option<bool>,
 ) -> Result<Response, ContractError> {
     assert_owner(deps.storage, &info.sender)?;
-    ensure_uptime(&deps, env)?;
 
     let mut messages: Vec<CosmosMsg> = vec![];
     let mut attributes: Vec<Attribute> = vec![];
 
-    let rewards = collect_rewards(&deps, env.contract.address.to_string(), position_id)?;
+    let rewards = collect_rewards(
+        &deps,
+        env.contract.address.to_string(),
+        position_id,
+        override_uptime.unwrap_or_default(),
+    )?;
 
     UNCOMPOUNDED_REWARDS.save(deps.storage, &rewards.non_vault)?;
     COMMISSION_REWARDS.save(deps.storage, &rewards.commission)?;
@@ -635,7 +647,7 @@ fn execute_withdraw_position(
     messages.push(msg_withdraw_position);
     attributes.push(attr("action", "banana_vault_withdraw_position"));
 
-    JOIN_TIME.save(deps.storage, &0)?;
+    POSITION_OPEN.save(deps.storage, &false)?;
 
     // operator will decide if we are to update users after the position is withdrawn
     if update_users.unwrap_or_default() {
@@ -664,9 +676,12 @@ fn execute_process_new_entries_and_exits(
     }
 
     // check that no position is open
-    if JOIN_TIME.load(deps.storage)? != 0 {
+    if POSITION_OPEN.load(deps.storage)? {
         return Err(ContractError::PositionOpen {});
     }
+
+    // Save last update to current block time. this lets the operator signal that updates are possible even if no one is joining or exiting
+    LAST_UPDATE.save(deps.storage, &env.block.time.seconds())?;
 
     let addresses_waiting_for_exit = ADDRESSES_WAITING_FOR_EXIT.load(deps.storage)?;
     let new_entries: Vec<(Addr, Vec<Coin>)> = ACCOUNTS_PENDING_ACTIVATION
@@ -687,6 +702,14 @@ fn execute_process_new_entries_and_exits(
     } else {
         Ok(Response::default())
     }
+}
+
+fn execute_claim_commission(deps: DepsMut, info: &MessageInfo) -> Result<Response, ContractError> {
+    assert_owner(deps.storage, &info.sender)?;
+
+    Ok(Response::new()
+        .add_messages(claim_commissions(deps)?)
+        .add_attribute("action", "banana_vault_claim_commission"))
 }
 
 fn execute_halt(deps: DepsMut, info: &MessageInfo) -> Result<Response, ContractError> {
@@ -763,7 +786,7 @@ fn execute_close_vault(
     VAULT_TERMINATED.save(deps.storage, &true)?;
 
     // if no position is open, we can trigger a user update here. otherwise the operator will have to do it when closing the position
-    if JOIN_TIME.load(deps.storage)? == 0 {
+    if !POSITION_OPEN.load(deps.storage)? {
         let update_users_msg = CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr: info.sender.to_string(),
             msg: to_json_binary(&ExecuteMsg::ProcessNewEntriesAndExits {})?,
@@ -791,7 +814,7 @@ fn execute_force_exits(deps: DepsMut, env: &Env) -> Result<Response, ContractErr
     let mut messages = vec![];
 
     // if an open position exists, close it
-    if JOIN_TIME.load(deps.storage)? != 0 {
+    if POSITION_OPEN.load(deps.storage)? {
         let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
         let user_positions_response: UserPositionsResponse =
             cl_querier.user_positions(env.contract.address.to_string(), config.pool_id, None)?;
@@ -805,6 +828,7 @@ fn execute_force_exits(deps: DepsMut, env: &Env) -> Result<Response, ContractErr
             &deps,
             env.contract.address.to_string(),
             position.position_id,
+            true,
         )?;
 
         let msg_withdraw_position: CosmosMsg = MsgWithdrawPosition {
@@ -816,7 +840,7 @@ fn execute_force_exits(deps: DepsMut, env: &Env) -> Result<Response, ContractErr
 
         messages.push(msg_withdraw_position);
 
-        JOIN_TIME.save(deps.storage, &0)?;
+        POSITION_OPEN.save(deps.storage, &false)?;
     }
 
     // send a CloseVault message to the contract
@@ -851,7 +875,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         }
         QueryMsg::UncompoundedRewards {} => to_json_binary(&query_uncompounded_rewards(deps)?),
         QueryMsg::CommissionRewards {} => to_json_binary(&query_commission_rewards(deps)?),
-        QueryMsg::Status {} => to_json_binary(&query_status(deps)?),
+        QueryMsg::Status {} => to_json_binary(&query_status(deps, &env)?),
     }
 }
 
@@ -867,7 +891,7 @@ fn query_total_active_assets(deps: Deps, env: &Env) -> StdResult<TotalAssetsResp
 
     let (mut asset0, mut asset1) = get_available_balances(&deps, &address)?;
 
-    if JOIN_TIME.load(deps.storage)? != 0 {
+    if POSITION_OPEN.load(deps.storage)? {
         let position = &ConcentratedliquidityQuerier::new(&deps.querier)
             .user_positions(address, config.pool_id, None)?
             .positions[0];
@@ -986,10 +1010,38 @@ fn query_commission_rewards(deps: Deps) -> StdResult<Vec<Coin>> {
     COMMISSION_REWARDS.load(deps.storage)
 }
 
-fn query_status(deps: Deps) -> StdResult<Status> {
+fn query_status(deps: Deps, env: &Env) -> StdResult<Status> {
+    let mut join_time = 0;
+    let mut uptime_locked = false;
+
+    if POSITION_OPEN.load(deps.storage)? {
+        let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
+        let position = &cl_querier
+            .user_positions(
+                env.contract.address.to_string(),
+                CONFIG.load(deps.storage)?.pool_id,
+                None,
+            )?
+            .positions[0];
+
+        join_time = position
+            .position
+            .as_ref()
+            .unwrap()
+            .join_time
+            .as_ref()
+            .unwrap()
+            .seconds as u64;
+
+        if !position.forfeited_incentives.is_empty() {
+            uptime_locked = true;
+        }
+    }
+
     Ok(Status {
-        join_time: JOIN_TIME.load(deps.storage)?,
+        join_time,
         last_update: LAST_UPDATE.load(deps.storage)?,
+        uptime_locked,
         cap_reached: CAP_REACHED.load(deps.storage)?,
         halted: HALT_EXITS_AND_JOINS.load(deps.storage)?,
         closed: VAULT_TERMINATED.load(deps.storage)?,
@@ -1008,6 +1060,7 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response
         ));
     }
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+
     Ok(Response::default())
 }
 
@@ -1115,20 +1168,6 @@ fn verify_availability_of_funds(
     Ok(())
 }
 
-fn ensure_uptime(deps: &DepsMut, env: &Env) -> Result<(), ContractError> {
-    // if uptime is set, check if enough time has passed to withdraw without forfeiting rewards
-    if let Some(uptime) = CONFIG.load(deps.storage)?.min_uptime {
-        // add one second for rounding safety
-        if env.block.time.seconds() - JOIN_TIME.load(deps.storage)? < uptime + 1 {
-            Err(ContractError::MinUptime())
-        } else {
-            Ok(())
-        }
-    } else {
-        Ok(())
-    }
-}
-
 // Asset0 and Asset1 liquid in the vault, minus pending assets and commissions
 fn get_available_balances(deps: &Deps, address: &String) -> Result<(Coin, Coin), StdError> {
     let config = CONFIG.load(deps.storage)?;
@@ -1177,6 +1216,7 @@ fn collect_rewards(
     deps: &DepsMut,
     sender: String,
     position_id: u64,
+    override_uptime: bool,
 ) -> Result<Rewards, ContractError> {
     let config = CONFIG.load(deps.storage)?;
 
@@ -1193,6 +1233,12 @@ fn collect_rewards(
     let mut reward_coins: Coins = Coins::default();
     let mut messages: Vec<CosmosMsg> = vec![];
     let mut attributes: Vec<Attribute> = vec![];
+
+    // if there's forfeited incentives in the response, min uptime for that incentive has yet not been met.
+    // can be overridden by the operator to allow forfeiture if repositioning is more advantageous
+    if !position.forfeited_incentives.is_empty() && !override_uptime {
+        return Err(ContractError::MinUptime());
+    }
 
     if !position.claimable_incentives.is_empty() {
         for incentive in &position.claimable_incentives {
@@ -1239,18 +1285,18 @@ fn collect_rewards(
     let mut uncompounded_rewards: Coins =
         Coins::try_from(UNCOMPOUNDED_REWARDS.load(deps.storage)?).unwrap_or_default();
 
-    for reward_coin in &reward_coins {
-        let commission_amount = reward_coin
-            .amount
-            .mul_floor(config.commission.unwrap_or(Decimal::zero()));
+    let commission_rate = config.commission.unwrap_or(Decimal::zero());
 
-        // compoundable rewards, minus commission
+    for reward_coin in &reward_coins {
+        let commission_amount = reward_coin.amount.mul_floor(commission_rate);
+
+        // compoundable rewards. add commission to the tracker
         if reward_coin.denom == config.asset0.denom {
             commission_coins[0].amount += commission_amount;
-            amount0 = reward_coin.amount.checked_sub(commission_amount)?;
+            amount0 = reward_coin.amount;
         } else if reward_coin.denom == config.asset1.denom {
             commission_coins[1].amount += commission_amount;
-            amount1 = reward_coin.amount.checked_sub(commission_amount)?;
+            amount1 = reward_coin.amount;
 
         // uncompounded rewards. commission will be deducted when the rewards are distributed
         } else {
@@ -1317,6 +1363,98 @@ fn prepare_swap(
         msg_split_route_swap_exact_amount_in,
         attr("action", "banana_vault_swap"),
     ))
+}
+
+fn claim_commissions(deps: DepsMut) -> Result<Vec<CosmosMsg>, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+
+    let ratios: Vec<(Addr, Decimal)> = VAULT_RATIO
+        .range(deps.storage, None, None, Order::Ascending)
+        .filter_map(Result::ok)
+        .collect();
+
+    let commission_rate = config.commission.unwrap_or(Decimal::zero());
+    let mut commission_rewards = COMMISSION_REWARDS.load(deps.storage)?;
+    let mut uncompounded_rewards = UNCOMPOUNDED_REWARDS.load(deps.storage)?;
+
+    let mut messages = vec![];
+    let mut updated_rewards = vec![];
+
+    for reward in uncompounded_rewards {
+        let commission_amount = reward.amount.mul_floor(commission_rate);
+
+        commission_rewards.push(Coin {
+            amount: commission_amount,
+            denom: reward.denom.clone(),
+        });
+
+        updated_rewards.push(Coin {
+            amount: reward.amount.checked_sub(commission_amount)?,
+            denom: reward.denom,
+        });
+    }
+
+    commission_rewards.retain(|f| f.amount.ne(&Uint128::zero()));
+
+    if !commission_rewards.is_empty() {
+        messages.push(
+            BankMsg::Send {
+                to_address: config.commission_receiver.to_string(),
+                amount: commission_rewards,
+            }
+            .into(),
+        );
+    }
+
+    uncompounded_rewards = updated_rewards;
+
+    let mut distributed_non_vault_rewards = Coins::default();
+
+    for (address, ratio) in &ratios {
+        // get the non vault rewards for each address
+        let rewards: Vec<Coin> = uncompounded_rewards
+            .iter()
+            .map(|c| {
+                let amount = c.amount.mul_floor(*ratio);
+                coin(amount.u128(), &c.denom)
+            })
+            .filter(|c| !c.amount.is_zero())
+            .map(|c| {
+                distributed_non_vault_rewards.add(c.clone()).unwrap();
+                c
+            })
+            .collect();
+
+        if !rewards.is_empty() {
+            messages.push(
+                BankMsg::Send {
+                    to_address: address.to_string(),
+                    amount: rewards,
+                }
+                .into(),
+            );
+        }
+    }
+
+    // Reduce all non vault rewards by the total amount sent
+    for each_non_vault_reward in &mut uncompounded_rewards {
+        each_non_vault_reward.amount = each_non_vault_reward.amount.checked_sub(
+            distributed_non_vault_rewards
+                .iter()
+                .find(|c| c.denom == each_non_vault_reward.denom)
+                .map(|c| c.amount)
+                .unwrap_or_default(),
+        )?;
+    }
+
+    uncompounded_rewards.retain(|c| !c.amount.is_zero());
+    UNCOMPOUNDED_REWARDS.save(deps.storage, &uncompounded_rewards)?;
+    COMMISSION_REWARDS.save(
+        deps.storage,
+        &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
+    )?;
+
+    Ok(messages)
 }
 
 fn process_entries_and_exits(
@@ -1392,28 +1530,12 @@ fn process_entries_and_exits(
         });
     }
 
-    commission_rewards.retain(|f| f.amount.ne(&Uint128::zero()));
-
-    if !commission_rewards.is_empty() {
-        messages.push(
-            BankMsg::Send {
-                to_address: config.commission_receiver.to_string(),
-                amount: commission_rewards,
-            }
-            .into(),
-        );
-    }
-
-    COMMISSION_REWARDS.save(
-        deps.storage,
-        &vec![
-            coin(0, config.asset0.denom.clone()),
-            coin(0, config.asset1.denom.clone()),
-        ],
-    )?;
-
     uncompounded_rewards = updated_rewards;
 
+    let mut distributed_vault_tokens = vec![
+        coin(0, config.asset0.denom.clone()),
+        coin(0, config.asset1.denom.clone()),
+    ];
     let mut distributed_non_vault_rewards = Coins::default();
 
     for (address, ratio) in &ratios {
@@ -1440,18 +1562,16 @@ fn process_entries_and_exits(
             let amount_to_send_asset0 = available_asset0.amount.mul_floor(*ratio);
             let amount_to_send_asset1 = available_asset1.amount.mul_floor(*ratio);
 
-            if amount_to_send_asset0.gt(&Uint128::zero()) {
-                amounts_send_msg.push(coin(
-                    amount_to_send_asset0.u128(),
-                    config.asset0.denom.clone(),
-                ));
+            if amount_to_send_asset0 > Uint128::zero() {
+                let coin_asset0 = coin(amount_to_send_asset0.u128(), config.asset0.denom.clone());
+                distributed_vault_tokens[0].amount += coin_asset0.amount;
+                amounts_send_msg.push(coin_asset0);
             }
 
-            if amount_to_send_asset1.gt(&Uint128::zero()) {
-                amounts_send_msg.push(coin(
-                    amount_to_send_asset1.u128(),
-                    config.asset1.denom.clone(),
-                ));
+            if amount_to_send_asset1 > Uint128::zero() {
+                let coin_asset1 = coin(amount_to_send_asset1.u128(), config.asset1.denom.clone());
+                distributed_vault_tokens[1].amount += coin_asset1.amount;
+                amounts_send_msg.push(coin_asset1);
             }
         } else {
             // if not, collect the dollar amounts to recaulculate the vault ratios
@@ -1522,7 +1642,10 @@ fn process_entries_and_exits(
     ACCOUNTS_PENDING_ACTIVATION.clear(deps.storage);
     ASSETS_PENDING_ACTIVATION.save(
         deps.storage,
-        &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
+        &vec![
+            coin(0, config.asset0.denom.clone()),
+            coin(0, config.asset1.denom.clone()),
+        ],
     )?;
     VAULT_RATIO.clear(deps.storage);
 
@@ -1533,15 +1656,41 @@ fn process_entries_and_exits(
 
     // If the vault is closed we send the dust left to the commission receiver
     if VAULT_TERMINATED.load(deps.storage)? {
+        let mut commission_rewards_coins =
+            Coins::try_from(commission_rewards.clone()).unwrap_or_default();
+
+        commission_rewards_coins.add(coin(
+            (available_asset0.amount - distributed_vault_tokens[0].amount).u128(),
+            config.asset0.denom.clone(),
+        ))?;
+        commission_rewards_coins.add(coin(
+            (available_asset1.amount - distributed_vault_tokens[1].amount).u128(),
+            config.asset1.denom.clone(),
+        ))?;
+        for each_non_vault_reward in &uncompounded_rewards {
+            commission_rewards_coins.add(each_non_vault_reward.clone())?;
+        }
+
+        commission_rewards = commission_rewards_coins.into();
+        uncompounded_rewards = vec![];
+    }
+
+    commission_rewards.retain(|f| f.amount.ne(&Uint128::zero()));
+
+    if !commission_rewards.is_empty() {
         messages.push(
             BankMsg::Send {
                 to_address: config.commission_receiver.to_string(),
-                amount: uncompounded_rewards,
+                amount: commission_rewards,
             }
             .into(),
         );
-        uncompounded_rewards = vec![];
     }
+
+    COMMISSION_REWARDS.save(
+        deps.storage,
+        &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
+    )?;
 
     UNCOMPOUNDED_REWARDS.save(deps.storage, &uncompounded_rewards)?;
 
@@ -1554,9 +1703,6 @@ fn process_entries_and_exits(
         }
         VAULT_RATIO.save(deps.storage, each_address.0.to_owned(), &ratio)?;
     }
-
-    // Save last update to current block time
-    LAST_UPDATE.save(deps.storage, &current_time)?;
 
     // Check that we are not over the vault cap, if that's the case, we will flag it to halt joins until under cap again
     if let Some(dollar_cap) = config.dollar_cap {
