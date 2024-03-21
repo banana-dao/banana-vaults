@@ -201,10 +201,11 @@ pub fn execute(
             match admin_msg {
                 VaultMsg::ModifyConfig(config) => execute_modify_config(deps, &env, &config),
                 VaultMsg::ModifyOperator(operator) => execute_modify_operator(deps, &operator),
-                VaultMsg::Whitelist { add, remove } => execute_whitelist(deps, add, remove),
+                VaultMsg::CompoundRewards(swap) => execute_compound_rewards(deps, &env, swap),
                 VaultMsg::CollectCommission => execute_collect_commission(deps),
                 VaultMsg::ProcessMints => execute_process_mints(deps, &env),
                 VaultMsg::ProcessBurns => execute_process_burns(deps, &env),
+                VaultMsg::Whitelist { add, remove } => execute_whitelist(deps, add, remove),
                 VaultMsg::Halt => execute_halt(deps),
                 VaultMsg::Resume => execute_resume(deps),
             }
@@ -317,6 +318,61 @@ fn execute_modify_operator(deps: DepsMut, new_operator: &Addr) -> Result<Respons
     Ok(Response::new()
         .add_attribute("action", "banana_vault_modify_operator")
         .add_attribute("new_operator", new_operator))
+}
+
+fn execute_compound_rewards(
+    deps: DepsMut,
+    env: &Env,
+    swaps: Vec<Swap>,
+) -> Result<Response, ContractError> {
+    let mut messages: Vec<CosmosMsg> = vec![];
+    let mut rewards = Coins::try_from(UNCOMPOUNDED_REWARDS.load(deps.storage)?).unwrap_or_default();
+
+    for swap in swaps {
+        let mut total_in = Uint128::zero();
+
+        for route in &swap.routes {
+            total_in += Uint128::from_str(&route.token_in_amount)?;
+        }
+
+        let available_balance = rewards.amount_of(&swap.token_in_denom);
+
+        // we can't swap more than we have recorded as collected
+        if total_in > available_balance {
+            return Err(ContractError::CannotSwapMoreThanAvailable {
+                denom: swap.token_in_denom,
+            });
+        } else {
+            rewards.sub(coin(total_in.u128(), swap.token_in_denom.clone()))?;
+        }
+
+        // make sure the denom out is one of the vault assets
+        let config = CONFIG.load(deps.storage)?;
+
+        if let Some(last_pool) = swap.routes.first().and_then(|route| route.pools.last()) {
+            if last_pool.token_out_denom != config.asset0.denom
+                && last_pool.token_out_denom != config.asset1.denom
+            {
+                return Err(ContractError::CannotSwapIntoAsset);
+            }
+        }
+
+        messages.push(
+            MsgSplitRouteSwapExactAmountIn {
+                sender: env.contract.address.to_string(),
+                routes: swap.routes,
+                token_in_denom: swap.token_in_denom,
+                token_out_min_amount: swap.token_out_min_amount,
+            }
+            .into(),
+        );
+    }
+
+    UNCOMPOUNDED_REWARDS.save(deps.storage, &rewards.to_vec())?;
+
+    Ok(Response::new()
+        .add_messages(messages)
+        .add_attribute("action", "banana_vault_compound_rewards"))
 }
 
 fn execute_whitelist(
@@ -1098,8 +1154,7 @@ fn verify_burn_funds(storage: &dyn Storage, funds: &[Coin]) -> Result<(), Contra
 
     if funds[0].amount < min_redemption {
         Err(ContractError::RedemptionBelowMinimum {
-            wanted: min_redemption.to_string(),
-            got: funds[0].amount.to_string(),
+            min: min_redemption.to_string(),
         })
     } else {
         Ok(())
@@ -1389,14 +1444,18 @@ fn prepare_swap(
     // We are not allowed to swap more than what we have currently liquid in the vault
     if swap.token_in_denom == asset0.denom {
         if token_in_amount > asset0.amount {
-            return Err(ContractError::CannotSwapMoreThanAvailable);
+            return Err(ContractError::CannotSwapMoreThanAvailable {
+                denom: asset0.denom.clone(),
+            });
         }
         asset0.amount = asset0.amount.checked_sub(token_in_amount)?;
     }
 
     if swap.token_in_denom == asset1.denom {
         if token_in_amount > asset1.amount {
-            return Err(ContractError::CannotSwapMoreThanAvailable);
+            return Err(ContractError::CannotSwapMoreThanAvailable {
+                denom: asset1.denom.clone(),
+            });
         }
         asset1.amount = asset1.amount.checked_sub(token_in_amount)?;
     }

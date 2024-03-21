@@ -63,6 +63,7 @@ pub enum ExecuteMsg {
 pub enum VaultMsg {
     ModifyConfig(Box<Config>),
     ModifyOperator(Addr),
+    CompoundRewards(Vec<Swap>),
     CollectCommission,
     // Process entries and exits
     ProcessMints,
@@ -102,12 +103,6 @@ pub enum PositionMsg {
         override_uptime: Option<bool>,
     },
 }
-#[cw_serde]
-pub struct Swap {
-    pub routes: Vec<SwapAmountInSplitRoute>,
-    pub token_in_denom: String,
-    pub token_out_min_amount: String,
-}
 
 #[cw_serde]
 pub enum DepositMsg {
@@ -116,6 +111,13 @@ pub enum DepositMsg {
         address: Option<Addr>,
         amount: Option<Uint128>,
     },
+}
+
+#[cw_serde]
+pub struct Swap {
+    pub routes: Vec<SwapAmountInSplitRoute>,
+    pub token_in_denom: String,
+    pub token_out_min_amount: String,
 }
 
 #[cw_serde]

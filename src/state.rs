@@ -22,8 +22,8 @@ pub enum TopKey {
     Halted = b'l',
     Terminated = b'm',
     PositionOpen = b'n',
-    UncompoundedRewards = b'o',
-    CommissionRewards = b'p',
+    CommissionRewards = b'o',
+    UncompoundedRewards = b'p',
 }
 
 impl TopKey {
@@ -66,10 +66,10 @@ pub const HALTED: Item<bool> = Item::new(TopKey::Halted.as_str());
 pub const TERMINATED: Item<bool> = Item::new(TopKey::Terminated.as_str());
 // Flag to indicate if the vault has an active position
 pub const POSITION_OPEN: Item<bool> = Item::new(TopKey::PositionOpen.as_str());
-// collected rewards that are not asset0 or asset1
-pub const UNCOMPOUNDED_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::UncompoundedRewards.as_str());
 // collected commissions
 pub const COMMISSION_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::CommissionRewards.as_str());
+// collected rewards that are not asset0 or asset1
+pub const UNCOMPOUNDED_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::UncompoundedRewards.as_str());
 
 #[cw_serde]
 pub struct Config {

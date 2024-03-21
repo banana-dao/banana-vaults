@@ -32,8 +32,8 @@ pub enum ContractError {
     #[error("Burn token must be {}", denom)]
     InvalidToken { denom: String },
 
-    #[error("Must redeem at least {} tokens, got {}", wanted, got)]
-    RedemptionBelowMinimum { wanted: String, got: String },
+    #[error("Must redeem at least {} tokens", min)]
+    RedemptionBelowMinimum { min: String },
 
     #[error("Config asset{} is invalid", asset)]
     InvalidConfigAsset { asset: u32 },
@@ -50,8 +50,11 @@ pub enum ContractError {
     #[error("Operation unauthorized")]
     Unauthorized,
 
-    #[error("Cannot swap more than available")]
-    CannotSwapMoreThanAvailable,
+    #[error("Cannot swap more than available of {}", denom)]
+    CannotSwapMoreThanAvailable { denom: String },
+
+    #[error("Cannot swap into non vault assets")]
+    CannotSwapIntoAsset,
 
     #[error("Vault cap reached, join not allowed until vault is under cap again")]
     CapReached,
@@ -92,7 +95,7 @@ pub enum ContractError {
     #[error("Insufficient funds to burn")]
     InsufficientFundsToBurn,
 
-    #[error("Insufficient funds to process burns")]
+    #[error("Insufficient available funds to process burn")]
     CantProcessBurn,
 
     #[error("Nothing to claim")]
