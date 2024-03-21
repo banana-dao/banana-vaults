@@ -298,14 +298,9 @@ fn execute_modify_config(
         let (asset0, asset1) =
             get_vault_balances(&deps.as_ref(), &env.contract.address.to_string(), true)?;
 
-        let (current_price_asset0, current_price_asset1) = get_asset_prices(&deps.as_ref(), env)?;
+        let pricing = get_vault_pricing(&deps.as_ref(), env, &asset0.amount, &asset1.amount)?;
 
-        let total_dollars_in_vault = asset0
-            .amount
-            .checked_mul(current_price_asset0)?
-            .checked_add(asset1.amount.checked_mul(current_price_asset1)?)?;
-
-        CAP_REACHED.save(deps.storage, &(total_dollars_in_vault >= new_dollar_cap))?;
+        CAP_REACHED.save(deps.storage, &(pricing.total_dollars >= new_dollar_cap))?;
     } else {
         CAP_REACHED.save(deps.storage, &false)?;
     }
@@ -850,7 +845,7 @@ fn execute_unlock(deps: DepsMut, env: &Env, info: &MessageInfo) -> Result<Respon
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::EstimateDeposit(deposit_query) => match deposit_query {
-            DepositQuery::Mint(coins) => to_json_binary(&query_estimate_mint(deps, &env, coins)?),
+            DepositQuery::Mint(coins) => to_json_binary(&query_estimate_mint(deps, &env, &coins)?),
             DepositQuery::Burn(amount) => to_json_binary(&query_estimate_burn(deps, &env, amount)?),
         },
         QueryMsg::LockedAssets => to_json_binary(&query_locked_assets(deps, &env)?),
@@ -879,30 +874,24 @@ fn query_locked_assets(deps: Deps, env: &Env) -> StdResult<Vec<Coin>> {
     Ok(vec![asset0, asset1])
 }
 
-fn query_estimate_mint(deps: Deps, env: &Env, coins: Vec<Coin>) -> StdResult<Vec<Coin>> {
+fn query_estimate_mint(deps: Deps, env: &Env, coins: &[Coin]) -> StdResult<Vec<Coin>> {
     let config = CONFIG.load(deps.storage)?;
 
-    let mint_funds: Vec<Coin> = verify_mint_funds(&coins, &config).unwrap();
+    let mint_funds: Vec<Coin> = verify_mint_funds(coins, &config).unwrap();
 
-    let (current_price_asset0, current_price_asset1) = get_asset_prices(&deps, env).unwrap();
     let (asset0, asset1) = get_vault_balances(&deps, &env.contract.address.to_string(), true)?;
 
-    let total_dollars = asset0
-        .amount
-        .checked_mul(current_price_asset0)?
-        .checked_add(asset1.amount.checked_mul(current_price_asset1)?)?;
+    let pricing = get_vault_pricing(&deps, env, &asset0.amount, &asset1.amount)?;
 
-    let vault_token_price = total_dollars
-        .checked_div(SUPPLY.load(deps.storage)?)
-        .unwrap();
+    let dollars_asset0 = mint_funds[0].amount.checked_mul(pricing.price0)?;
+    let dollars_asset1 = mint_funds[1].amount.checked_mul(pricing.price1)?;
 
-    let dollars_to_mint = mint_funds[0]
-        .amount
-        .checked_mul(current_price_asset0)?
-        .checked_add(mint_funds[1].amount.checked_mul(current_price_asset1)?)?;
+    let total_dollars_to_mint = dollars_asset0.checked_add(dollars_asset1)?;
 
     Ok(vec![coin(
-        dollars_to_mint.checked_div(vault_token_price)?.u128(),
+        total_dollars_to_mint
+            .checked_div(pricing.vault_price)?
+            .u128(),
         VAULT_DENOM.load(deps.storage)?,
     )])
 }
@@ -1494,17 +1483,9 @@ fn process_mints(
     let (asset0, asset1) =
         get_vault_balances(&deps.as_ref(), &env.contract.address.to_string(), true)?;
 
-    let (current_price_asset0, current_price_asset1) = get_asset_prices(&deps.as_ref(), env)?;
+    let pricing = get_vault_pricing(&deps.as_ref(), env, &asset0.amount, &asset1.amount)?;
 
-    // get the total dollar value of the vault
-    let mut total_dollars_in_vault = asset0
-        .amount
-        .checked_mul(current_price_asset0)?
-        .checked_add(asset1.amount.checked_mul(current_price_asset1)?)?;
-
-    // get the dollar value of each vault token
-    let supply = SUPPLY.load(deps.storage)?;
-    let vault_token_price = total_dollars_in_vault.checked_div(supply).unwrap();
+    let mut total_dollars_in_vault = pricing.total_dollars;
 
     let mut messages: Vec<CosmosMsg> = vec![];
     let mut attributes = vec![attr("action", "banana_vault_mint")];
@@ -1514,14 +1495,14 @@ fn process_mints(
 
     // for each account to mint we will calculate their dollar value to determine the amount of tokens to mint
     for (address, (coins, min_out)) in entries {
-        let dollars_asset0 = coins[0].amount.checked_mul(current_price_asset0)?;
+        let dollars_asset0 = coins[0].amount.checked_mul(pricing.price0)?;
 
-        let dollars_asset1 = coins[1].amount.checked_mul(current_price_asset1)?;
+        let dollars_asset1 = coins[1].amount.checked_mul(pricing.price1)?;
 
         let total_dollars_address = dollars_asset0.checked_add(dollars_asset1)?;
 
         let to_mint = total_dollars_address
-            .checked_div(vault_token_price)
+            .checked_div(pricing.vault_price)
             .unwrap();
 
         attributes.push(attr("address", address.to_string()));
@@ -1561,7 +1542,8 @@ fn process_mints(
     attributes.push(attr("total_minted", total_minted.to_string()));
 
     // update total supply of vault tokens with new mints
-    SUPPLY.save(deps.storage, &(supply + total_minted))?;
+    let supply = SUPPLY.load(deps.storage)?;
+    SUPPLY.save(deps.storage, &(supply.checked_add(total_minted)?))?;
 
     ASSETS_PENDING_MINT.save(deps.storage, &pending_assets)?;
 
@@ -1698,8 +1680,36 @@ fn process_burns(
     Ok((messages, attributes))
 }
 
+struct Pricing {
+    total_dollars: Uint128,
+    price0: Uint128,
+    price1: Uint128,
+    vault_price: Uint128,
+}
+
+fn get_vault_pricing(
+    deps: &Deps,
+    env: &Env,
+    amount0: &Uint128,
+    amount1: &Uint128,
+) -> StdResult<Pricing> {
+    let (price0, price1) = get_asset_prices(deps, env)?;
+
+    let dollars0 = amount0.checked_mul(price0)?;
+    let dollars1 = amount1.checked_mul(price1)?;
+
+    let total_dollars = dollars0.checked_add(dollars1)?;
+
+    Ok(Pricing {
+        total_dollars,
+        price0,
+        price1,
+        vault_price: total_dollars.checked_div(SUPPLY.load(deps.storage)?)?,
+    })
+}
+
 // gets the up-to-date prices for each vault asset
-fn get_asset_prices(deps: &Deps, env: &Env) -> Result<(Uint128, Uint128), ContractError> {
+fn get_asset_prices(deps: &Deps, env: &Env) -> StdResult<(Uint128, Uint128)> {
     let config = CONFIG.load(deps.storage)?;
     let current_time = env.block.time.seconds();
 
@@ -1740,11 +1750,10 @@ pub trait PriceQuerier {
         time: i64,
         expiry: u64,
         exponent: u32,
-    ) -> Result<Uint128, ContractError>;
+    ) -> StdResult<Uint128>;
 }
 
 struct PythQuerier;
-
 impl PriceQuerier for PythQuerier {
     fn query_asset_price(
         &self,
@@ -1754,17 +1763,23 @@ impl PriceQuerier for PythQuerier {
         time: i64,
         expiry: u64,
         exponent: u32,
-    ) -> Result<Uint128, ContractError> {
-        match query_price_feed(querier, contract_address, identifier)?
+    ) -> StdResult<Uint128> {
+        query_price_feed(querier, contract_address, identifier)?
             .price_feed
             .get_price_no_older_than(time, expiry)
-        {
-            Some(price) => Ok(Uint128::new(
-                // convert pricing to a base 10^18 representation for precision
-                price.price as u128 * 10_u128.pow(18) / 10_u128.pow(exponent),
-            )),
-            None => Err(ContractError::StalePrice { seconds: expiry }),
-        }
+            .map_or_else(
+                || {
+                    Err(StdError::generic_err(format!(
+                        "Pyth quote is older than {expiry} seconds, please update"
+                    )))
+                },
+                |price| {
+                    Ok(Uint128::new(
+                        // convert pricing to a base 10^18 representation for precision
+                        price.price as u128 * 10_u128.pow(18) / 10_u128.pow(exponent),
+                    ))
+                },
+            )
     }
 }
 
@@ -1779,7 +1794,7 @@ impl PriceQuerier for MockPriceQuerier {
         _time: i64,
         _expiry: u64,
         exponent: u32,
-    ) -> Result<Uint128, ContractError> {
+    ) -> StdResult<Uint128> {
         if identifier
             == PriceIdentifier::from_hex(
                 "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6",
@@ -1787,7 +1802,7 @@ impl PriceQuerier for MockPriceQuerier {
             .unwrap()
         {
             return Ok(Uint128::new(
-                164243925_u128 * 10_u128.pow(18) / 10_u128.pow(exponent),
+                164_243_925_u128 * 10_u128.pow(18) / 10_u128.pow(exponent),
             ));
         }
         if identifier
@@ -1797,7 +1812,7 @@ impl PriceQuerier for MockPriceQuerier {
             .unwrap()
         {
             return Ok(Uint128::new(
-                1031081328_u128 * 10_u128.pow(18) / 10_u128.pow(exponent),
+                1_031_081_328_u128 * 10_u128.pow(18) / 10_u128.pow(exponent),
             ));
         }
         if identifier
@@ -1807,7 +1822,7 @@ impl PriceQuerier for MockPriceQuerier {
             .unwrap()
         {
             return Ok(Uint128::new(
-                278558964008_u128 * 10_u128.pow(18) / 10_u128.pow(exponent),
+                278_558_964_008_u128 * 10_u128.pow(18) / 10_u128.pow(exponent),
             ));
         }
 
