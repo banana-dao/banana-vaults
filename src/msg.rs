@@ -129,6 +129,8 @@ pub enum QueryMsg {
     LockedAssets,
     #[returns(Vec<AccountResponse>)]
     AccountStatus(AccountQuery),
+    #[returns(Vec<Coin>)]
+    Rewards(RewardQuery),
     #[returns(WhitelistResponse)]
     Whitelist {
         start_after: Option<Addr>,
@@ -165,6 +167,12 @@ pub struct AccountResponse {
 }
 
 #[cw_serde]
+pub enum RewardQuery {
+    Commission,
+    Uncompounded,
+}
+
+#[cw_serde]
 pub struct WhitelistResponse {
     pub whitelisted_depositors: Vec<Addr>,
 }
@@ -177,12 +185,10 @@ pub struct Status {
     pub cap_reached: bool,
     pub halted: bool,
     pub closed: bool,
-    pub owner: Addr,
-    pub operator: Addr,
     pub denom: String,
     pub supply: Uint128,
-    pub uncompounded_rewards: Vec<Coin>,
-    pub uncollected_commission: Vec<Coin>,
+    pub owner: Addr,
+    pub operator: Addr,
     pub config: Config,
 }
 

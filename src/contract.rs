@@ -2,7 +2,7 @@ use crate::{
     error::ContractError,
     msg::{
         AccountQuery, AccountResponse, DepositMsg, DepositQuery, Environment, ExecuteMsg,
-        InstantiateMsg, MigrateMsg, PositionMsg, QueryMsg, Status, Swap, VaultMsg,
+        InstantiateMsg, MigrateMsg, PositionMsg, QueryMsg, RewardQuery, Status, Swap, VaultMsg,
         WhitelistResponse,
     },
     state::{
@@ -915,6 +915,10 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 to_json_binary(&query_pending_burn(deps, start_after, limit)?)
             }
         },
+        QueryMsg::Rewards(reward_query) => match reward_query {
+            RewardQuery::Commission => to_json_binary(&query_commission_rewards(deps)?),
+            RewardQuery::Uncompounded => to_json_binary(&query_uncompounded_rewards(deps)?),
+        },
         QueryMsg::Whitelist { start_after, limit } => {
             to_json_binary(&query_whitelist(deps, start_after, limit))
         }
@@ -1024,6 +1028,14 @@ fn query_pending_burn(
         .collect())
 }
 
+fn query_commission_rewards(deps: Deps) -> StdResult<Vec<Coin>> {
+    COMMISSION_REWARDS.load(deps.storage)
+}
+
+fn query_uncompounded_rewards(deps: Deps) -> StdResult<Vec<Coin>> {
+    UNCOMPOUNDED_REWARDS.load(deps.storage)
+}
+
 fn query_whitelist(deps: Deps, start_after: Option<Addr>, limit: Option<u32>) -> WhitelistResponse {
     let limit = limit.unwrap_or(MAX_PAGE_LIMIT).min(MAX_PAGE_LIMIT);
     let start = start_after.map(Bound::exclusive);
@@ -1078,8 +1090,6 @@ fn query_vault_status(deps: Deps, env: &Env) -> StdResult<Status> {
         operator: OPERATOR.load(deps.storage)?,
         denom: VAULT_DENOM.load(deps.storage)?,
         supply: SUPPLY.load(deps.storage)?,
-        uncompounded_rewards: UNCOMPOUNDED_REWARDS.load(deps.storage)?,
-        uncollected_commission: COMMISSION_REWARDS.load(deps.storage)?,
         config: CONFIG.load(deps.storage)?,
     })
 }
