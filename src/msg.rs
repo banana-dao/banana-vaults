@@ -111,7 +111,7 @@ pub struct Swap {
 
 #[cw_serde]
 pub enum DepositMsg {
-    Mint,
+    Mint(Option<Uint128>),
     Burn {
         address: Option<Addr>,
         amount: Option<Uint128>,
@@ -121,8 +121,9 @@ pub enum DepositMsg {
 #[cw_serde]
 #[derive(QueryResponses)]
 pub enum QueryMsg {
-    // Tells you how much of each vault asset is currently locked (not pending join)
-    #[returns(AssetsResponse)]
+    #[returns(Vec<Coin>)]
+    EstimateDeposit(DepositQuery),
+    #[returns(Vec<Coin>)]
     LockedAssets,
     #[returns(Vec<AccountResponse>)]
     AccountStatus(AccountQuery),
@@ -136,9 +137,9 @@ pub enum QueryMsg {
 }
 
 #[cw_serde]
-pub struct AssetsResponse {
-    pub asset0: Coin,
-    pub asset1: Coin,
+pub enum DepositQuery {
+    Mint(Vec<Coin>),
+    Burn(Uint128),
 }
 
 #[cw_serde]
@@ -158,6 +159,7 @@ pub enum AccountQuery {
 pub struct AccountResponse {
     pub address: Addr,
     pub amount: Vec<Coin>,
+    pub min_out: Option<Uint128>,
 }
 
 #[cw_serde]

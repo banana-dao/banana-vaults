@@ -1,5 +1,5 @@
 use crate::msg::{
-    AssetsResponse, DepositMsg, Environment,
+    DepositMsg, Environment,
     ExecuteMsg::{Deposit, ManagePosition, ManageVault},
     InstantiateMsg,
     PositionMsg::{CreatePosition, WithdrawPosition},
@@ -7,7 +7,7 @@ use crate::msg::{
     VaultAsset, VaultMsg,
 };
 use cosmos_sdk_proto::cosmos::params::v1beta1::ParameterChangeProposal;
-use cosmwasm_std::{coin, Addr, Coin, Decimal, Uint128};
+use cosmwasm_std::{coin, Addr, Coin, Coins, Decimal, Uint128};
 use osmosis_std_modified::types::{
     cosmos::bank::v1beta1::MsgSend,
     osmosis::concentratedliquidity::v1beta1::{MsgCreatePosition, UserPositionsRequest},
@@ -327,7 +327,7 @@ fn execute_joins(
             .wasm
             .execute(
                 &test_env.contract_addr,
-                &Deposit(DepositMsg::Mint {}),
+                &Deposit(DepositMsg::Mint(None)),
                 &[coin(join_amounts.0[i] * exp, join_denom)],
                 user,
             )
@@ -483,17 +483,15 @@ fn test_join_and_leave() {
     let modules = get_modules(&test_env);
 
     for (i, join_amounts) in JOINS.iter().enumerate() {
-        let initial_contract_balance: AssetsResponse = modules
+        let initial_contract_balance: Vec<Coin> = modules
             .wasm
             .query(&test_env.contract_addr, &LockedAssets {})
             .unwrap();
 
-        let initial_contract_dollar_value = initial_contract_balance
-            .asset0
+        let initial_contract_dollar_value = initial_contract_balance[0]
             .amount
             .mul_floor(get_price("uosmo"))
-            + initial_contract_balance
-                .asset1
+            + initial_contract_balance[1]
                 .amount
                 .mul_floor(get_price("uatom"));
 
@@ -553,17 +551,15 @@ fn test_join_and_leave() {
             .all(|(fin, initial)| fin >= &(initial.mul(PRECISION.0.div(PRECISION.1)))));
 
         // check that the contract balance is also correct
-        let final_contract_balance: AssetsResponse = modules
+        let final_contract_balance: Vec<Coin> = modules
             .wasm
             .query(&test_env.contract_addr, &LockedAssets {})
             .unwrap();
 
-        let final_dollar_value = final_contract_balance
-            .asset0
+        let final_dollar_value = final_contract_balance[0]
             .amount
             .mul_floor(get_price("uosmo"))
-            + final_contract_balance
-                .asset1
+            + final_contract_balance[1]
                 .amount
                 .mul_floor(get_price("uatom"));
 
@@ -579,14 +575,14 @@ fn test_join_and_leave_with_18_exp() {
     let modules = get_modules(&test_env);
 
     for (i, join_amounts) in WEI_JOINS.iter().enumerate() {
-        let initial_contract_balance: AssetsResponse = modules
+        let initial_contract_balance: Vec<Coin> = modules
             .wasm
             .query(&test_env.contract_addr, &LockedAssets {})
             .unwrap();
 
-        let initial_contract_dollar_value = Decimal::new(initial_contract_balance.asset0.amount)
+        let initial_contract_dollar_value = Decimal::new(initial_contract_balance[0].amount)
             .mul(get_price("uosmo"))
-            + Decimal::new(initial_contract_balance.asset1.amount).mul(get_price("wei"));
+            + Decimal::new(initial_contract_balance[1].amount).mul(get_price("wei"));
 
         let uosmo_initial_balances = execute_joins(
             &test_env,
@@ -637,14 +633,14 @@ fn test_join_and_leave_with_18_exp() {
             .all(|(&fin, &initial)| Decimal::new(fin)
                 >= Decimal::new(initial).mul(PRECISION.0.div(PRECISION.1))));
 
-        let final_contract_balance: AssetsResponse = modules
+        let final_contract_balance: Vec<Coin> = modules
             .wasm
             .query(&test_env.contract_addr, &LockedAssets {})
             .unwrap();
 
-        let final_dollar_value = Decimal::new(final_contract_balance.asset0.amount)
+        let final_dollar_value = Decimal::new(final_contract_balance[0].amount)
             .mul(get_price("uosmo"))
-            + Decimal::new(final_contract_balance.asset1.amount).mul(get_price("wei"));
+            + Decimal::new(final_contract_balance[1].amount).mul(get_price("wei"));
 
         assert!(
             final_dollar_value >= initial_contract_dollar_value.mul(PRECISION.0.div(PRECISION.1))
@@ -680,7 +676,7 @@ fn test_multiple_recalculations() {
         .wasm
         .execute(
             &test_env.contract_addr,
-            &Deposit(DepositMsg::Mint {}),
+            &Deposit(DepositMsg::Mint(None)),
             &[coin(53_000_000, "uatom"), coin(500_000_000, "uosmo")],
             &user,
         )
@@ -868,14 +864,14 @@ fn test_queries() {
     //     )
     //     .unwrap();
 
-    let contract_balance: AssetsResponse = modules
+    let contract_balance: Vec<Coin> = modules
         .wasm
         .query(&test_env.contract_addr, &LockedAssets {})
         .unwrap();
 
-    let contract_dollar_value: Decimal = Decimal::new(contract_balance.asset0.amount)
+    let contract_dollar_value: Decimal = Decimal::new(contract_balance[0].amount)
         .mul(get_price("uosmo"))
-        + Decimal::new(contract_balance.asset1.amount).mul(get_price("uatom"));
+        + Decimal::new(contract_balance[1].amount).mul(get_price("uatom"));
 
     let uosmo_balance =
         Uint128::new(user_balance_list(&test_env, &modules, "uosmo".to_string())[0]);
@@ -904,10 +900,12 @@ fn test_queries() {
     // );
 
     // check that TotalAssetsResponse return the value of assets we can use
-    let new_contract_balance: AssetsResponse = modules
+    let new_contract_balance: Vec<Coin> = modules
         .wasm
         .query(&test_env.contract_addr, &LockedAssets {})
         .unwrap();
+
+    let coins = Coins::try_from(new_contract_balance).unwrap();
 
     modules
         .wasm
@@ -916,10 +914,7 @@ fn test_queries() {
             &ManagePosition(CreatePosition {
                 lower_tick: -10000,
                 upper_tick: 10000,
-                tokens_provided: vec![
-                    new_contract_balance.asset1.clone(),
-                    new_contract_balance.asset0.clone(),
-                ],
+                tokens_provided: coins.into(),
                 token_min_amount0: "1".to_string(),
                 token_min_amount1: "1".to_string(),
                 swap: None,

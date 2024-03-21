@@ -1,7 +1,7 @@
 use crate::{
     error::ContractError,
     msg::{
-        AccountQuery, AccountResponse, AssetsResponse, DepositMsg, Environment, ExecuteMsg,
+        AccountQuery, AccountResponse, DepositMsg, DepositQuery, Environment, ExecuteMsg,
         InstantiateMsg, MigrateMsg, PositionMsg, QueryMsg, Status, Swap, VaultMsg,
         WhitelistResponse,
     },
@@ -55,7 +55,7 @@ const DEC_18: u128 = 1_000_000_000_000_000_000;
 const MAX_UPDATE_INTERVAL: u64 = 86400 * 14; // 14 days
 
 // Default minimum amount of coins that can be burned at once
-const DEFAULT_MIN_REDEMPTION: Uint128 = Uint128::new(DEC_18);
+const DEFAULT_MIN_REDEMPTION: Uint128 = Uint128::new(1_000_000);
 
 // Pagination
 const MAX_PAGE_LIMIT: u32 = 250;
@@ -199,7 +199,7 @@ pub fn execute(
                 return Err(ContractError::Unauthorized);
             }
             match admin_msg {
-                VaultMsg::ModifyConfig(config) => execute_modify_config(deps, &env, *config),
+                VaultMsg::ModifyConfig(config) => execute_modify_config(deps, &env, &config),
                 VaultMsg::ModifyOperator(operator) => execute_modify_operator(deps, &operator),
                 VaultMsg::Whitelist { add, remove } => execute_whitelist(deps, add, remove),
                 VaultMsg::CollectCommission => execute_collect_commission(deps),
@@ -267,7 +267,7 @@ pub fn execute(
             }
         }
         ExecuteMsg::Deposit(deposit_msg) => match deposit_msg {
-            DepositMsg::Mint => execute_deposit_for_mint(deps, &info),
+            DepositMsg::Mint(min_out) => execute_deposit_for_mint(deps, &info, &min_out),
             DepositMsg::Burn { address, amount } => {
                 execute_deposit_for_burn(deps, &env, &info, address, amount)
             }
@@ -279,7 +279,7 @@ pub fn execute(
 fn execute_modify_config(
     deps: DepsMut,
     env: &Env,
-    new_config: Config,
+    new_config: &Config,
 ) -> Result<Response, ContractError> {
     deps.api
         .addr_validate(new_config.pyth_contract_address.as_str())?;
@@ -298,7 +298,7 @@ fn execute_modify_config(
         let (asset0, asset1) =
             get_vault_balances(&deps.as_ref(), &env.contract.address.to_string(), true)?;
 
-        let (current_price_asset0, current_price_asset1) = get_asset_prices(env, &deps)?;
+        let (current_price_asset0, current_price_asset1) = get_asset_prices(&deps.as_ref(), env)?;
 
         let total_dollars_in_vault = asset0
             .amount
@@ -310,7 +310,7 @@ fn execute_modify_config(
         CAP_REACHED.save(deps.storage, &false)?;
     }
 
-    CONFIG.save(deps.storage, &new_config)?;
+    CONFIG.save(deps.storage, new_config)?;
 
     Ok(Response::new().add_attribute("action", "banana_vault_modify_config"))
 }
@@ -362,7 +362,11 @@ fn execute_whitelist(
     Ok(Response::new().add_attributes(attributes))
 }
 
-fn execute_deposit_for_mint(deps: DepsMut, info: &MessageInfo) -> Result<Response, ContractError> {
+fn execute_deposit_for_mint(
+    deps: DepsMut,
+    info: &MessageInfo,
+    min_out: &Option<Uint128>,
+) -> Result<Response, ContractError> {
     // Check if vault is closed
     if TERMINATED.load(deps.storage)? {
         return Err(ContractError::VaultClosed);
@@ -404,14 +408,26 @@ fn execute_deposit_for_mint(deps: DepsMut, info: &MessageInfo) -> Result<Respons
 
     ASSETS_PENDING_MINT.save(deps.storage, &assets_pending)?;
 
-    // Check if user added to the current pending amount or if it's the first time he added
-    if let Some(mut funds) = ACCOUNTS_PENDING_MINT.may_load(deps.storage, info.sender.clone())? {
-        funds[0].amount += mint_assets[0].amount;
-        funds[1].amount += mint_assets[1].amount;
+    let min_out = min_out.unwrap_or_default();
 
-        ACCOUNTS_PENDING_MINT.save(deps.storage, info.sender.clone(), &funds)?;
+    // Check if user added to the current pending amount or if it's the first time he added
+    if let Some((mut current_funds, current_min_out)) =
+        ACCOUNTS_PENDING_MINT.may_load(deps.storage, info.sender.clone())?
+    {
+        current_funds[0].amount += mint_assets[0].amount;
+        current_funds[1].amount += mint_assets[1].amount;
+
+        ACCOUNTS_PENDING_MINT.save(
+            deps.storage,
+            info.sender.clone(),
+            &(current_funds, current_min_out + min_out),
+        )?;
     } else {
-        ACCOUNTS_PENDING_MINT.save(deps.storage, info.sender.clone(), &mint_assets)?;
+        ACCOUNTS_PENDING_MINT.save(
+            deps.storage,
+            info.sender.clone(),
+            &(mint_assets.clone(), min_out),
+        )?;
     }
 
     Ok(Response::new()
@@ -473,7 +489,7 @@ fn execute_deposit_for_burn(
     }
 
     // We return any pending joining assets immediately
-    if let Some(mut pending_mint) =
+    if let Some((mut pending_mint, _)) =
         ACCOUNTS_PENDING_MINT.may_load(deps.storage, burn_address.clone())?
     {
         let mut assets_pending = ASSETS_PENDING_MINT.load(deps.storage)?;
@@ -761,12 +777,12 @@ fn execute_unlock(deps: DepsMut, env: &Env, info: &MessageInfo) -> Result<Respon
     let mut attributes = vec![];
 
     // We get any addresses that are waiting to mint and send the funds back
-    let addresses_pending_activation: Vec<(Addr, Vec<Coin>)> = ACCOUNTS_PENDING_MINT
+    let addresses_pending_activation: Vec<(Addr, (Vec<Coin>, _))> = ACCOUNTS_PENDING_MINT
         .range(deps.storage, None, None, Order::Ascending)
         .filter_map(Result::ok)
         .collect();
 
-    for (address, amount) in &addresses_pending_activation {
+    for (address, (amount, _)) in &addresses_pending_activation {
         let mut funds = amount.clone();
 
         // Remove empty amounts to avoid sending empty funds in bank msg
@@ -833,15 +849,19 @@ fn execute_unlock(deps: DepsMut, env: &Env, info: &MessageInfo) -> Result<Respon
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
+        QueryMsg::EstimateDeposit(deposit_query) => match deposit_query {
+            DepositQuery::Mint(coins) => to_json_binary(&query_estimate_mint(deps, &env, coins)?),
+            DepositQuery::Burn(amount) => to_json_binary(&query_estimate_burn(deps, &env, amount)?),
+        },
         QueryMsg::LockedAssets => to_json_binary(&query_locked_assets(deps, &env)?),
         QueryMsg::AccountStatus(pending_query) => match pending_query {
             AccountQuery::Mint {
                 address,
                 start_after,
                 limit,
-            } => to_json_binary(&query_mint(deps, address, start_after, limit)?),
+            } => to_json_binary(&query_pending_mint(deps, address, start_after, limit)?),
             AccountQuery::Burn { start_after, limit } => {
-                to_json_binary(&query_burn(deps, start_after, limit)?)
+                to_json_binary(&query_pending_burn(deps, start_after, limit)?)
             }
         },
         QueryMsg::Whitelist { start_after, limit } => {
@@ -851,15 +871,55 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     }
 }
 
-fn query_locked_assets(deps: Deps, env: &Env) -> StdResult<AssetsResponse> {
+fn query_locked_assets(deps: Deps, env: &Env) -> StdResult<Vec<Coin>> {
     let address = env.contract.address.to_string();
 
     let (asset0, asset1) = get_vault_balances(&deps, &address, true)?;
 
-    Ok(AssetsResponse { asset0, asset1 })
+    Ok(vec![asset0, asset1])
 }
 
-fn query_mint(
+fn query_estimate_mint(deps: Deps, env: &Env, coins: Vec<Coin>) -> StdResult<Vec<Coin>> {
+    let config = CONFIG.load(deps.storage)?;
+
+    let mint_funds: Vec<Coin> = verify_mint_funds(&coins, &config).unwrap();
+
+    let (current_price_asset0, current_price_asset1) = get_asset_prices(&deps, env).unwrap();
+    let (asset0, asset1) = get_vault_balances(&deps, &env.contract.address.to_string(), true)?;
+
+    let total_dollars = asset0
+        .amount
+        .checked_mul(current_price_asset0)?
+        .checked_add(asset1.amount.checked_mul(current_price_asset1)?)?;
+
+    let vault_token_price = total_dollars
+        .checked_div(SUPPLY.load(deps.storage)?)
+        .unwrap();
+
+    let dollars_to_mint = mint_funds[0]
+        .amount
+        .checked_mul(current_price_asset0)?
+        .checked_add(mint_funds[1].amount.checked_mul(current_price_asset1)?)?;
+
+    Ok(vec![coin(
+        dollars_to_mint.checked_div(vault_token_price)?.u128(),
+        VAULT_DENOM.load(deps.storage)?,
+    )])
+}
+
+fn query_estimate_burn(deps: Deps, env: &Env, amount: Uint128) -> StdResult<Vec<Coin>> {
+    let (asset0, asset1) = get_vault_balances(&deps, &env.contract.address.to_string(), true)?;
+    let ratio = Decimal::new(amount)
+        .checked_div(Decimal::new(SUPPLY.load(deps.storage)?))
+        .unwrap();
+
+    Ok(vec![
+        coin(asset0.amount.mul_floor(ratio).u128(), asset0.denom),
+        coin(asset1.amount.mul_floor(ratio).u128(), asset1.denom),
+    ])
+}
+
+fn query_pending_mint(
     deps: Deps,
     address: Option<Addr>,
     start_after: Option<Addr>,
@@ -867,10 +927,12 @@ fn query_mint(
 ) -> StdResult<Vec<AccountResponse>> {
     let limit = limit.unwrap_or(MAX_PAGE_LIMIT).min(MAX_PAGE_LIMIT);
     let start = start_after.map(Bound::exclusive);
-    let pending_mint: Vec<(Addr, Vec<Coin>)> = match address {
+    let pending_mint: Vec<(Addr, (Vec<Coin>, _))> = match address {
         Some(addr) => {
-            if let Some(pending) = ACCOUNTS_PENDING_MINT.may_load(deps.storage, addr.clone())? {
-                vec![(addr, pending)]
+            if let Some((pending, min_out)) =
+                ACCOUNTS_PENDING_MINT.may_load(deps.storage, addr.clone())?
+            {
+                vec![(addr, (pending, min_out))]
             } else {
                 vec![]
             }
@@ -884,14 +946,15 @@ fn query_mint(
 
     Ok(pending_mint
         .iter()
-        .map(|(address, amount)| AccountResponse {
+        .map(|(address, (amount, min_out))| AccountResponse {
             address: address.clone(),
             amount: amount.clone(),
+            min_out: Some(*min_out),
         })
         .collect())
 }
 
-fn query_burn(
+fn query_pending_burn(
     deps: Deps,
     start_after: Option<Addr>,
     limit: Option<u32>,
@@ -911,6 +974,7 @@ fn query_burn(
         .map(|(address, amount)| AccountResponse {
             address: address.clone(),
             amount: vec![coin(amount.u128(), denom.clone())],
+            min_out: None,
         })
         .collect())
 }
@@ -1416,7 +1480,7 @@ fn process_mints(
     deps: DepsMut,
     env: &Env,
 ) -> Result<(Vec<CosmosMsg>, Vec<Attribute>), ContractError> {
-    let entries: Vec<(Addr, Vec<Coin>)> = ACCOUNTS_PENDING_MINT
+    let entries: Vec<(Addr, (Vec<Coin>, Uint128))> = ACCOUNTS_PENDING_MINT
         .range(deps.storage, None, None, Order::Ascending)
         .filter_map(Result::ok)
         .collect();
@@ -1430,7 +1494,7 @@ fn process_mints(
     let (asset0, asset1) =
         get_vault_balances(&deps.as_ref(), &env.contract.address.to_string(), true)?;
 
-    let (current_price_asset0, current_price_asset1) = get_asset_prices(env, &deps)?;
+    let (current_price_asset0, current_price_asset1) = get_asset_prices(&deps.as_ref(), env)?;
 
     // get the total dollar value of the vault
     let mut total_dollars_in_vault = asset0
@@ -1446,9 +1510,10 @@ fn process_mints(
     let mut attributes = vec![attr("action", "banana_vault_mint")];
 
     let mut total_minted = Uint128::zero();
+    let mut pending_assets = ASSETS_PENDING_MINT.load(deps.storage)?;
 
     // for each account to mint we will calculate their dollar value to determine the amount of tokens to mint
-    for (address, coins) in entries {
+    for (address, (coins, min_out)) in entries {
         let dollars_asset0 = coins[0].amount.checked_mul(current_price_asset0)?;
 
         let dollars_asset1 = coins[1].amount.checked_mul(current_price_asset1)?;
@@ -1459,24 +1524,35 @@ fn process_mints(
             .checked_div(vault_token_price)
             .unwrap();
 
-        // note: in the case that 0 tokens are minted the deposit will be taken uncredited
-        if !to_mint.is_zero() {
-            messages.push(
-                MsgMint {
-                    sender: env.contract.address.to_string(),
-                    amount: Some(osmosis_std_modified::types::cosmos::base::v1beta1::Coin {
-                        denom: VAULT_DENOM.load(deps.storage)?,
-                        amount: to_mint.to_string(),
-                    }),
-                    mint_to_address: address.to_string(),
-                }
-                .into(),
-            );
-        }
-
         attributes.push(attr("address", address.to_string()));
         attributes.push(attr("minted", to_mint.to_string()));
         attributes.push(attr("deposited", format!("{},{}", coins[0], coins[1])));
+
+        // we only process the mint if it's within the user's defined slippage, however in the case that
+        // min_out is set to 0 and 0 tokens are minted the deposit will be taken uncredited
+        if to_mint >= min_out {
+            pending_assets[0].amount -= coins[0].amount;
+            pending_assets[1].amount -= coins[1].amount;
+            ACCOUNTS_PENDING_MINT.remove(deps.storage, address.clone());
+
+            if !to_mint.is_zero() {
+                messages.push(
+                    MsgMint {
+                        sender: env.contract.address.to_string(),
+                        amount: Some(osmosis_std_modified::types::cosmos::base::v1beta1::Coin {
+                            denom: VAULT_DENOM.load(deps.storage)?,
+                            amount: to_mint.to_string(),
+                        }),
+                        mint_to_address: address.to_string(),
+                    }
+                    .into(),
+                );
+            }
+
+        // otherwise we skip processing of this mint and leave it in queue
+        } else {
+            attributes.push(attr("slippage", format!("\"{to_mint}\",\"{min_out}\"")));
+        }
 
         total_minted += to_mint;
         total_dollars_in_vault = total_dollars_in_vault.checked_add(total_dollars_address)?;
@@ -1487,15 +1563,7 @@ fn process_mints(
     // update total supply of vault tokens with new mints
     SUPPLY.save(deps.storage, &(supply + total_minted))?;
 
-    // clear the pending tokens and accounts
-    ASSETS_PENDING_MINT.save(
-        deps.storage,
-        &vec![
-            coin(0, config.asset0.denom.clone()),
-            coin(0, config.asset1.denom.clone()),
-        ],
-    )?;
-    ACCOUNTS_PENDING_MINT.clear(deps.storage);
+    ASSETS_PENDING_MINT.save(deps.storage, &pending_assets)?;
 
     // Check that we are not over the vault cap, if that's the case, we will flag it to halt joins until under cap again
     if let Some(dollar_cap) = config.dollar_cap {
@@ -1609,7 +1677,7 @@ fn process_burns(
 
     // otherwise check if we are back under the deposit cap
     } else if let Some(dollar_cap) = config.dollar_cap {
-        let (current_price_asset0, current_price_asset1) = get_asset_prices(env, &deps)?;
+        let (current_price_asset0, current_price_asset1) = get_asset_prices(&deps.as_ref(), env)?;
 
         let dollars_asset0 = (total_asset0
             .amount
@@ -1631,7 +1699,7 @@ fn process_burns(
 }
 
 // gets the up-to-date prices for each vault asset
-fn get_asset_prices(env: &Env, deps: &DepsMut) -> Result<(Uint128, Uint128), ContractError> {
+fn get_asset_prices(deps: &Deps, env: &Env) -> Result<(Uint128, Uint128), ContractError> {
     let config = CONFIG.load(deps.storage)?;
     let current_time = env.block.time.seconds();
 

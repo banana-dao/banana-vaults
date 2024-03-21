@@ -51,7 +51,7 @@ pub const LAST_UPDATE: Item<u64> = Item::new(TopKey::LastUpdate.as_str());
 // Assets waiting to join the vault
 pub const ASSETS_PENDING_MINT: Item<Vec<Coin>> = Item::new(TopKey::AssetPendingMint.as_str());
 // Accounts pending activation and how much for each one
-pub const ACCOUNTS_PENDING_MINT: Map<Addr, Vec<Coin>> =
+pub const ACCOUNTS_PENDING_MINT: Map<Addr, (Vec<Coin>, Uint128)> =
     Map::new(TopKey::AccountsPendingMint.as_str());
 // Addresses pending to leave the vault
 pub const ACCOUNTS_PENDING_BURN: Map<Addr, Uint128> =
