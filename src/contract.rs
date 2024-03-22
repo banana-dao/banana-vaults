@@ -396,17 +396,14 @@ fn execute_whitelist(
 
     for address in remove.unwrap_or_default() {
         deps.api.addr_validate(address.as_str())?;
-        match WHITELISTED_DEPOSITORS.may_load(deps.storage, address.clone())? {
-            Some(_) => {
-                WHITELISTED_DEPOSITORS.remove(deps.storage, address.clone());
-                attributes.push(attr("action", "banana_vault_whitelist_remove"));
-                attributes.push(attr("address", address));
-            }
-            None => {
-                return Err(ContractError::AddressNotInWhitelist {
-                    address: address.to_string(),
-                });
-            }
+        if WHITELISTED_DEPOSITORS.has(deps.storage, address.clone()) {
+            WHITELISTED_DEPOSITORS.remove(deps.storage, address.clone());
+            attributes.push(attr("action", "banana_vault_whitelist_remove"));
+            attributes.push(attr("address", address));
+        } else {
+            return Err(ContractError::AddressNotInWhitelist {
+                address: address.to_string(),
+            });
         }
     }
 
@@ -423,25 +420,20 @@ fn execute_deposit_for_mint(
         return Err(ContractError::VaultClosed);
     }
 
-    // Check if vault is halted or cap has been reached
+    // Check if vault is halted
     if HALTED.load(deps.storage)? {
         return Err(ContractError::VaultHalted);
     }
 
     // Check if vault cap has been reached and user is not whitelisted to exceed it
     if CAP_REACHED.load(deps.storage)?
-        && WHITELISTED_DEPOSITORS
-            .may_load(deps.storage, info.sender.clone())?
-            .is_none()
+        && !WHITELISTED_DEPOSITORS.has(deps.storage, info.sender.clone())
     {
         return Err(ContractError::CapReached);
     }
 
     // Check if user is already waiting to burn
-    if ACCOUNTS_PENDING_BURN
-        .may_load(deps.storage, info.sender.clone())?
-        .is_some()
-    {
+    if ACCOUNTS_PENDING_BURN.has(deps.storage, info.sender.clone()) {
         return Err(ContractError::AccountPendingBurn {
             address: info.sender.to_string(),
         });
@@ -481,10 +473,7 @@ fn execute_deposit_for_mint(
         )?;
     }
 
-    Ok(Response::new()
-        .add_attribute("action", "banana_vault_deposit_for_mint")
-        .add_attribute("address", info.sender.to_string())
-        .add_attribute("amount", mint_assets[0].amount))
+    Ok(Response::new().add_attribute("action", "banana_vault_deposit_for_mint"))
 }
 
 fn execute_deposit_for_burn(
@@ -784,7 +773,7 @@ fn execute_collect_commission(deps: DepsMut) -> Result<Response, ContractError> 
     let config = CONFIG.load(deps.storage)?;
     let commission_rewards = COMMISSION_REWARDS.load(deps.storage)?;
 
-    if commission_rewards.is_empty() {
+    if commission_rewards[0].amount.is_zero() && commission_rewards[1].amount.is_zero() {
         return Err(ContractError::CannotClaim);
     }
 
