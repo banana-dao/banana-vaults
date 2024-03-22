@@ -771,9 +771,11 @@ fn execute_process_burns(deps: DepsMut, env: &Env) -> Result<Response, ContractE
 
 fn execute_collect_commission(deps: DepsMut) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    let commission_rewards = COMMISSION_REWARDS.load(deps.storage)?;
+    let mut commission_rewards = COMMISSION_REWARDS.load(deps.storage)?;
 
-    if commission_rewards[0].amount.is_zero() && commission_rewards[1].amount.is_zero() {
+    commission_rewards.retain(|f| !f.amount.is_zero());
+
+    if commission_rewards.is_empty() {
         return Err(ContractError::CannotClaim);
     }
 
