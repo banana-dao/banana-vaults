@@ -41,9 +41,6 @@ pub enum ContractError {
     #[error("The assets of the config cannot change")]
     CannotChangeAssets,
 
-    #[error("The pool id cannot change")]
-    CannotChangePoolId,
-
     #[error("Trying to add more than available {}{} to position.", amount, asset)]
     CannotAddMoreThanAvailableForAsset { asset: String, amount: String },
 
@@ -73,6 +70,9 @@ pub enum ContractError {
 
     #[error("Amount of {} provided is below minimum", denom)]
     DepositBelowMinimum { denom: String },
+
+    #[error("Deposits for {} are not allowed", denom)]
+    DepositNotAllowed { denom: String },
 
     #[error("Can't remove position, age is less than min uptime")]
     MinUptime,

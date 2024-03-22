@@ -76,26 +76,6 @@ pub fn instantiate(
     deps.api.addr_validate(msg.operator.as_str())?;
     OPERATOR.save(deps.storage, &msg.operator)?;
 
-    let pool: Pool = match PoolmanagerQuerier::new(&deps.querier)
-        .pool(msg.pool_id)?
-        .pool
-    {
-        Some(pool) => {
-            if pool
-                .type_url
-                .ne(&"/osmosis.concentratedliquidity.v1beta1.Pool".to_string())
-            {
-                return Err(ContractError::PoolIsNotCL);
-            }
-            prost::Message::decode(pool.value.as_slice()).unwrap()
-        }
-        None => {
-            return Err(ContractError::PoolNotFound {
-                pool_id: msg.pool_id,
-            });
-        }
-    };
-
     let pyth_contract_address = match msg.env {
         Some(Environment::Mainnet) | None => PYTH_MAINNET_CONTRACT_ADDRESS,
         Some(Environment::Testnet) => PYTH_TESTNET_CONTRACT_ADDRESS,
@@ -117,14 +97,11 @@ pub fn instantiate(
             .unwrap_or_else(|| info.sender.clone()),
     };
 
-    // Check that the assets in the pool are the same assets we sent in the instantiate message
-    verify_config(&config, &pool)?;
+    // Check that the pool is the correct type and has the correct assets
+    verify_pool(&deps.as_ref(), &config)?;
 
     // Check that funds sent match with config
     verify_mint_funds(&info.funds, &config)?;
-
-    // Check that funds sent are above minimum deposit
-    verify_deposit_minimum(&info, &config)?;
 
     CONFIG.save(deps.storage, &config)?;
 
@@ -287,13 +264,18 @@ fn execute_modify_config(
 
     let old_config = CONFIG.load(deps.storage)?;
 
-    if new_config.asset0 != old_config.asset0 || new_config.asset1 != old_config.asset1 {
+    // disallow changing asset info, except for minimum deposit
+    if new_config.asset0.denom != old_config.asset0.denom
+        || new_config.asset1.denom != old_config.asset1.denom
+        || new_config.asset0.decimals != old_config.asset0.decimals
+        || new_config.asset1.decimals != old_config.asset1.decimals
+        || new_config.asset0.price_identifier != old_config.asset0.price_identifier
+        || new_config.asset1.price_identifier != old_config.asset1.price_identifier
+    {
         return Err(ContractError::CannotChangeAssets);
     }
 
-    if new_config.pool_id != old_config.pool_id {
-        return Err(ContractError::CannotChangePoolId);
-    }
+    verify_pool(&deps.as_ref(), new_config)?;
 
     if let Some(new_dollar_cap) = new_config.dollar_cap {
         let (asset0, asset1) =
@@ -441,7 +423,6 @@ fn execute_deposit_for_mint(
 
     let config = CONFIG.load(deps.storage)?;
     let mint_assets = verify_mint_funds(&info.funds, &config)?;
-    verify_deposit_minimum(info, &config)?;
 
     // We queue up the assets for the next iteration
     let mut assets_pending = ASSETS_PENDING_MINT.load(deps.storage)?;
@@ -1102,7 +1083,27 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response
 }
 
 // Helpers
-fn verify_config(config: &Config, pool: &Pool) -> Result<(), ContractError> {
+fn verify_pool(deps: &Deps, config: &Config) -> Result<(), ContractError> {
+    let pool: Pool = match PoolmanagerQuerier::new(&deps.querier)
+        .pool(config.pool_id)?
+        .pool
+    {
+        Some(pool) => {
+            if pool
+                .type_url
+                .ne(&"/osmosis.concentratedliquidity.v1beta1.Pool".to_string())
+            {
+                return Err(ContractError::PoolIsNotCL);
+            }
+            prost::Message::decode(pool.value.as_slice()).unwrap()
+        }
+        None => {
+            return Err(ContractError::PoolNotFound {
+                pool_id: config.pool_id,
+            });
+        }
+    };
+
     if config.asset0.denom != pool.token0 {
         return Err(ContractError::InvalidConfigAsset { asset: 0 });
     }
@@ -1126,8 +1127,10 @@ fn verify_mint_funds(funds: &[Coin], config: &Config) -> Result<Vec<Coin>, Contr
 
     for fund in funds {
         if fund.denom == config.asset0.denom {
+            check_deposit_min(&config.asset0.min_deposit, fund)?;
             assets[0].amount = fund.amount;
         } else if fund.denom == config.asset1.denom {
+            check_deposit_min(&config.asset1.min_deposit, fund)?;
             assets[1].amount = fund.amount;
         } else {
             return Err(ContractError::InvalidMintAssets);
@@ -1135,6 +1138,21 @@ fn verify_mint_funds(funds: &[Coin], config: &Config) -> Result<Vec<Coin>, Contr
     }
 
     Ok(assets)
+}
+
+fn check_deposit_min(min_deposit: &Uint128, coin: &Coin) -> Result<(), ContractError> {
+    if min_deposit.is_zero() {
+        return Err(ContractError::DepositNotAllowed {
+            denom: coin.denom.clone(),
+        });
+    }
+    if coin.amount.lt(min_deposit) {
+        return Err(ContractError::DepositBelowMinimum {
+            denom: coin.denom.clone(),
+        });
+    }
+
+    Ok(())
 }
 
 fn verify_burn_funds(storage: &dyn Storage, funds: &[Coin]) -> Result<(), ContractError> {
@@ -1160,27 +1178,6 @@ fn verify_burn_funds(storage: &dyn Storage, funds: &[Coin]) -> Result<(), Contra
     } else {
         Ok(())
     }
-}
-
-fn verify_deposit_minimum(info: &MessageInfo, config: &Config) -> Result<(), ContractError> {
-    for token_provided in &info.funds {
-        if token_provided.denom == config.asset0.denom
-            && token_provided.amount.lt(&config.asset0.min_deposit)
-        {
-            return Err(ContractError::DepositBelowMinimum {
-                denom: config.asset0.denom.clone(),
-            });
-        }
-        if token_provided.denom == config.asset1.denom
-            && token_provided.amount.lt(&config.asset1.min_deposit)
-        {
-            return Err(ContractError::DepositBelowMinimum {
-                denom: config.asset1.denom.clone(),
-            });
-        }
-    }
-
-    Ok(())
 }
 
 fn verify_availability_of_funds(
