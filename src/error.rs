@@ -1,16 +1,12 @@
 use std::num::ParseIntError;
 
 use cosmwasm_std::{CheckedFromRatioError, OverflowError, StdError};
-use cw_ownable::OwnershipError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ContractError {
     #[error("{0}")]
     Std(#[from] StdError),
-
-    #[error(transparent)]
-    Ownership(#[from] OwnershipError),
 
     #[error(transparent)]
     OverflowError(#[from] OverflowError),
@@ -25,58 +21,67 @@ pub enum ContractError {
     PoolNotFound { pool_id: u64 },
 
     #[error("Pool is not a Concentrated Liquidity Pool")]
-    PoolIsNotCL {},
+    PoolIsNotCL,
+
+    #[error("Commission rate can't be set to 100% or more")]
+    CommissionTooHigh,
 
     #[error("Funds must be sent to participate in the vault")]
-    NoFunds {},
+    NoFunds,
 
-    #[error("You need to send funds that belong to this pool, and not repeat assets")]
-    InvalidFunds {},
+    #[error("Mint tokens must be asset0 or asset1")]
+    InvalidMintAssets,
+
+    #[error("Burn token must be {}", denom)]
+    InvalidToken { denom: String },
+
+    #[error("Must redeem at least {} tokens", min)]
+    RedemptionBelowMinimum { min: String },
 
     #[error("Config asset{} is invalid", asset)]
     InvalidConfigAsset { asset: u32 },
 
     #[error("The assets of the config cannot change")]
-    CannotChangeAssets {},
-
-    #[error("The pool id cannot change")]
-    CannotChangePoolId {},
+    CannotChangeAssets,
 
     #[error("Trying to add more than available {}{} to position.", amount, asset)]
     CannotAddMoreThanAvailableForAsset { asset: String, amount: String },
 
-    #[error("Operation unauthorized - only contract can call this function")]
-    Unauthorized {},
+    #[error("Operation unauthorized")]
+    Unauthorized,
 
-    #[error("Cannot swap more than available")]
-    CannotSwapMoreThanAvailable {},
+    #[error("Cannot swap more than available of {}", denom)]
+    CannotSwapMoreThanAvailable { denom: String },
+
+    #[error("Cannot swap into non vault assets")]
+    CannotSwapIntoAsset,
 
     #[error("Vault cap reached, join not allowed until vault is under cap again")]
-    CapReached {},
+    CapReached,
 
     #[error("Vault halted, nobody can join or leave until unhalted")]
-    VaultHalted {},
+    VaultHalted,
 
     #[error("Vault closed, nobody can join and funds returned to users")]
-    VaultClosed {},
+    VaultClosed,
 
-    #[error("Cant force exits yet. Still {} seconds remaining", seconds)]
-    CantForceExitsYet { seconds: u64 },
+    #[error("Can't unlock vault yet. Still {} seconds remaining", seconds)]
+    CantUnlockYet { seconds: u64 },
 
     #[error("No position found")]
-    NoPositionsOpen {},
+    NoPositionsOpen,
 
     #[error("Amount of {} provided is below minimum", denom)]
     DepositBelowMinimum { denom: String },
 
-    #[error("Pyth price quote is older than {} seconds, please update", seconds)]
-    StalePrice { seconds: u64 },
+    #[error("Deposits for {} are not allowed", denom)]
+    DepositNotAllowed { denom: String },
 
     #[error("Can't remove position, age is less than min uptime")]
-    MinUptime(),
+    MinUptime,
 
     #[error("Open CL position found")]
-    PositionOpen(),
+    PositionOpen,
 
     #[error("Address {} already whitelisted", address)]
     AddressInWhitelist { address: String },
@@ -85,8 +90,17 @@ pub enum ContractError {
     AddressNotInWhitelist { address: String },
 
     #[error("You can't make someone else exit")]
-    CannotForceExit {},
+    CannotForceExit,
 
-    #[error("Address {} is already pending exit", address)]
-    AddressPendingExit { address: String },
+    #[error("Account {} is already pending exit", address)]
+    AccountPendingBurn { address: String },
+
+    #[error("Insufficient funds to burn")]
+    InsufficientFundsToBurn,
+
+    #[error("Insufficient available funds to process burn")]
+    CantProcessBurn,
+
+    #[error("Nothing to claim")]
+    CannotClaim,
 }
