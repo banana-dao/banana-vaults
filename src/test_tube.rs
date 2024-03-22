@@ -212,6 +212,8 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
                 metadata: None,
                 pool_id: 1,
                 price_expiry: 60,
+                min_asset0: 10000_u64.into(),
+                min_asset1: 10000_u64.into(),
                 asset0: VaultAsset {
                     denom: "uosmo".to_string(),
                     price_identifier: PriceIdentifier::from_hex(
@@ -219,7 +221,6 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
                     )
                     .unwrap(),
                     decimals: 6,
-                    min_deposit: 1000000_u64.into(),
                 },
                 asset1: asset1.clone(),
                 min_redemption: None,
@@ -263,7 +264,6 @@ fn get_asset(denom: &str) -> VaultAsset {
             )
             .unwrap(),
             decimals: 6,
-            min_deposit: 1000000_u64.into(),
         },
         "wei" => VaultAsset {
             denom: "wei".to_string(),
@@ -272,7 +272,6 @@ fn get_asset(denom: &str) -> VaultAsset {
             )
             .unwrap(),
             decimals: 18,
-            min_deposit: 1000000_u64.into(),
         },
         _ => panic!("invalid denom"),
     }

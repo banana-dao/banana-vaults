@@ -2,13 +2,14 @@ use crate::{
     error::ContractError,
     msg::{
         AccountQuery, AccountResponse, DepositMsg, DepositQuery, Environment, ExecuteMsg,
-        InstantiateMsg, MigrateMsg, PositionMsg, QueryMsg, RewardQuery, Status, Swap, VaultMsg,
-        WhitelistResponse,
+        InstantiateMsg, MigrateMsg, ModifyMsg, PositionMsg, QueryMsg, RewardQuery, State,
+        StateQuery, Swap, VaultMsg, WhitelistResponse,
     },
     state::{
         Config, ACCOUNTS_PENDING_BURN, ACCOUNTS_PENDING_MINT, ASSETS_PENDING_MINT, CAP_REACHED,
-        COMMISSION_REWARDS, CONFIG, HALTED, LAST_UPDATE, OPERATOR, OWNER, POSITION_OPEN, SUPPLY,
-        TERMINATED, UNCOMPOUNDED_REWARDS, VAULT_DENOM, WHITELISTED_DEPOSITORS,
+        COMMISSION_RATE, COMMISSION_REWARDS, CONFIG, HALTED, LAST_UPDATE, OPERATOR, OWNER, POOL_ID,
+        POSITION_OPEN, SUPPLY, TERMINATED, UNCOMPOUNDED_REWARDS, VAULT_ASSETS, VAULT_DENOM,
+        WHITELISTED_DEPOSITORS,
     },
 };
 use cosmwasm_std::{
@@ -84,24 +85,36 @@ pub fn instantiate(
 
     let config = Config {
         metadata: msg.metadata,
-        pool_id: msg.pool_id,
-        asset0: msg.asset0,
-        asset1: msg.asset1,
+        min_asset0: msg.min_asset0,
+        min_asset1: msg.min_asset1,
         min_redemption: msg.min_redemption,
         dollar_cap: msg.dollar_cap,
         pyth_contract_address: Addr::unchecked(pyth_contract_address),
         price_expiry: msg.price_expiry,
-        commission: msg.commission,
         commission_receiver: msg
             .commission_receiver
             .unwrap_or_else(|| info.sender.clone()),
     };
 
     // Check that the pool is the correct type and has the correct assets
-    verify_pool(&deps.as_ref(), &config)?;
+    verify_pool(
+        &deps.as_ref(),
+        msg.pool_id,
+        msg.asset0.denom.clone(),
+        msg.asset1.denom.clone(),
+    )?;
+
+    POOL_ID.save(deps.storage, &msg.pool_id)?;
+    VAULT_ASSETS.save(deps.storage, &(msg.asset0.clone(), msg.asset1.clone()))?;
 
     // Check that funds sent match with config
-    verify_mint_funds(&info.funds, &config)?;
+    verify_mint_funds(
+        &info.funds,
+        msg.asset0.denom.clone(),
+        msg.asset1.denom.clone(),
+        &msg.min_asset0,
+        &msg.min_asset1,
+    )?;
 
     CONFIG.save(deps.storage, &config)?;
 
@@ -140,16 +153,21 @@ pub fn instantiate(
     ASSETS_PENDING_MINT.save(
         deps.storage,
         &vec![
-            coin(0, config.asset0.denom.clone()),
-            coin(0, config.asset1.denom.clone()),
+            coin(0, msg.asset0.denom.clone()),
+            coin(0, msg.asset1.denom.clone()),
         ],
     )?;
 
-    UNCOMPOUNDED_REWARDS.save(deps.storage, &vec![])?;
+    if msg.commission.unwrap_or_default() >= Decimal::percent(100) {
+        return Err(ContractError::CommissionTooHigh);
+    }
+    COMMISSION_RATE.save(deps.storage, &msg.commission.unwrap_or_default())?;
     COMMISSION_REWARDS.save(
         deps.storage,
-        &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
+        &vec![coin(0, msg.asset0.denom), coin(0, msg.asset1.denom)],
     )?;
+
+    UNCOMPOUNDED_REWARDS.save(deps.storage, &vec![])?;
 
     Ok(Response::new()
         .add_message(create_msg)
@@ -176,13 +194,17 @@ pub fn execute(
                 return Err(ContractError::Unauthorized);
             }
             match admin_msg {
-                VaultMsg::ModifyConfig(config) => execute_modify_config(deps, &env, &config),
-                VaultMsg::ModifyOperator(operator) => execute_modify_operator(deps, &operator),
+                VaultMsg::Modify(modify_msg) => match modify_msg {
+                    ModifyMsg::Operator(operator) => execute_modify_operator(deps, &operator),
+                    ModifyMsg::Config(config) => execute_modify_config(deps, &env, &config),
+                    ModifyMsg::PoolId(pool_id) => execute_modify_pool_id(deps, pool_id),
+                    ModifyMsg::Commission(commission) => execute_modify_commission(deps, commission),
+                    ModifyMsg::Whitelist { add, remove } => execute_whitelist(deps, add, remove),
+                },
                 VaultMsg::CompoundRewards(swap) => execute_compound_rewards(deps, &env, swap),
                 VaultMsg::CollectCommission => execute_collect_commission(deps),
                 VaultMsg::ProcessMints => execute_process_mints(deps, &env),
                 VaultMsg::ProcessBurns => execute_process_burns(deps, &env),
-                VaultMsg::Whitelist { add, remove } => execute_whitelist(deps, add, remove),
                 VaultMsg::Halt => execute_halt(deps),
                 VaultMsg::Resume => execute_resume(deps),
             }
@@ -254,6 +276,15 @@ pub fn execute(
     }
 }
 
+fn execute_modify_operator(deps: DepsMut, new_operator: &Addr) -> Result<Response, ContractError> {
+    deps.api.addr_validate(new_operator.as_str())?;
+    OPERATOR.save(deps.storage, new_operator)?;
+
+    Ok(Response::new()
+        .add_attribute("action", "banana_vault_modify_operator")
+        .add_attribute("new_operator", new_operator))
+}
+
 fn execute_modify_config(
     deps: DepsMut,
     env: &Env,
@@ -261,21 +292,6 @@ fn execute_modify_config(
 ) -> Result<Response, ContractError> {
     deps.api
         .addr_validate(new_config.pyth_contract_address.as_str())?;
-
-    let old_config = CONFIG.load(deps.storage)?;
-
-    // disallow changing asset info, except for minimum deposit
-    if new_config.asset0.denom != old_config.asset0.denom
-        || new_config.asset1.denom != old_config.asset1.denom
-        || new_config.asset0.decimals != old_config.asset0.decimals
-        || new_config.asset1.decimals != old_config.asset1.decimals
-        || new_config.asset0.price_identifier != old_config.asset0.price_identifier
-        || new_config.asset1.price_identifier != old_config.asset1.price_identifier
-    {
-        return Err(ContractError::CannotChangeAssets);
-    }
-
-    verify_pool(&deps.as_ref(), new_config)?;
 
     if let Some(new_dollar_cap) = new_config.dollar_cap {
         let (asset0, asset1) =
@@ -293,68 +309,37 @@ fn execute_modify_config(
     Ok(Response::new().add_attribute("action", "banana_vault_modify_config"))
 }
 
-fn execute_modify_operator(deps: DepsMut, new_operator: &Addr) -> Result<Response, ContractError> {
-    deps.api.addr_validate(new_operator.as_str())?;
-    OPERATOR.save(deps.storage, new_operator)?;
-
-    Ok(Response::new()
-        .add_attribute("action", "banana_vault_modify_operator")
-        .add_attribute("new_operator", new_operator))
-}
-
-fn execute_compound_rewards(
-    deps: DepsMut,
-    env: &Env,
-    swaps: Vec<Swap>,
-) -> Result<Response, ContractError> {
-    let mut messages: Vec<CosmosMsg> = vec![];
-    let mut rewards = Coins::try_from(UNCOMPOUNDED_REWARDS.load(deps.storage)?).unwrap_or_default();
-
-    for swap in swaps {
-        let mut total_in = Uint128::zero();
-
-        for route in &swap.routes {
-            total_in += Uint128::from_str(&route.token_in_amount)?;
-        }
-
-        let available_balance = rewards.amount_of(&swap.token_in_denom);
-
-        // we can't swap more than we have recorded as collected
-        if total_in > available_balance {
-            return Err(ContractError::CannotSwapMoreThanAvailable {
-                denom: swap.token_in_denom,
-            });
-        } else {
-            rewards.sub(coin(total_in.u128(), swap.token_in_denom.clone()))?;
-        }
-
-        // make sure the denom out is one of the vault assets
-        let config = CONFIG.load(deps.storage)?;
-
-        if let Some(last_pool) = swap.routes.first().and_then(|route| route.pools.last()) {
-            if last_pool.token_out_denom != config.asset0.denom
-                && last_pool.token_out_denom != config.asset1.denom
-            {
-                return Err(ContractError::CannotSwapIntoAsset);
-            }
-        }
-
-        messages.push(
-            MsgSplitRouteSwapExactAmountIn {
-                sender: env.contract.address.to_string(),
-                routes: swap.routes,
-                token_in_denom: swap.token_in_denom,
-                token_out_min_amount: swap.token_out_min_amount,
-            }
-            .into(),
-        );
+// We will allow the pool type to change as long as the assets are the same
+fn execute_modify_pool_id(deps: DepsMut, new_pool_id: u64) -> Result<Response, ContractError> {
+    // no position should be open as the contract needs the correct pool id to force close it
+    if POSITION_OPEN.load(deps.storage)? {
+        return Err(ContractError::PositionOpen);
     }
 
-    UNCOMPOUNDED_REWARDS.save(deps.storage, &rewards.to_vec())?;
+    let vault_assets = VAULT_ASSETS.load(deps.storage)?;
+    verify_pool(
+        &deps.as_ref(),
+        new_pool_id,
+        vault_assets.0.denom,
+        vault_assets.1.denom,
+    )?;
+
+    POOL_ID.save(deps.storage, &new_pool_id)?;
 
     Ok(Response::new()
-        .add_messages(messages)
-        .add_attribute("action", "banana_vault_compound_rewards"))
+        .add_attribute("action", "banana_vault_modify_pool_id")
+        .add_attribute("new_pool_id", new_pool_id.to_string()))
+}
+
+fn execute_modify_commission(deps: DepsMut, new_commission: Decimal) -> Result<Response, ContractError> {
+    if new_commission >= Decimal::percent(100) {
+        return Err(ContractError::CommissionTooHigh);
+    }
+    COMMISSION_RATE.save(deps.storage, &new_commission)?;
+
+    Ok(Response::new()
+        .add_attribute("action", "banana_vault_modify_commission")
+        .add_attribute("new_commission", new_commission.to_string()))
 }
 
 fn execute_whitelist(
@@ -392,6 +377,61 @@ fn execute_whitelist(
     Ok(Response::new().add_attributes(attributes))
 }
 
+fn execute_compound_rewards(
+    deps: DepsMut,
+    env: &Env,
+    swaps: Vec<Swap>,
+) -> Result<Response, ContractError> {
+    let mut messages: Vec<CosmosMsg> = vec![];
+    let mut rewards = Coins::try_from(UNCOMPOUNDED_REWARDS.load(deps.storage)?).unwrap_or_default();
+
+    for swap in swaps {
+        let mut total_in = Uint128::zero();
+
+        for route in &swap.routes {
+            total_in += Uint128::from_str(&route.token_in_amount)?;
+        }
+
+        let available_balance = rewards.amount_of(&swap.token_in_denom);
+
+        // we can't swap more than we have recorded as collected
+        if total_in > available_balance {
+            return Err(ContractError::CannotSwapMoreThanAvailable {
+                denom: swap.token_in_denom,
+            });
+        } else {
+            rewards.sub(coin(total_in.u128(), swap.token_in_denom.clone()))?;
+        }
+
+        // make sure the denom out is one of the vault assets
+        let vault_assets = VAULT_ASSETS.load(deps.storage)?;
+
+        if let Some(last_pool) = swap.routes.first().and_then(|route| route.pools.last()) {
+            if last_pool.token_out_denom != vault_assets.0.denom
+                && last_pool.token_out_denom != vault_assets.1.denom
+            {
+                return Err(ContractError::CannotSwapIntoAsset);
+            }
+        }
+
+        messages.push(
+            MsgSplitRouteSwapExactAmountIn {
+                sender: env.contract.address.to_string(),
+                routes: swap.routes,
+                token_in_denom: swap.token_in_denom,
+                token_out_min_amount: swap.token_out_min_amount,
+            }
+            .into(),
+        );
+    }
+
+    UNCOMPOUNDED_REWARDS.save(deps.storage, &rewards.to_vec())?;
+
+    Ok(Response::new()
+        .add_messages(messages)
+        .add_attribute("action", "banana_vault_compound_rewards"))
+}
+
 fn execute_deposit_for_mint(
     deps: DepsMut,
     info: &MessageInfo,
@@ -421,8 +461,15 @@ fn execute_deposit_for_mint(
         });
     }
 
+    let vault_assets = VAULT_ASSETS.load(deps.storage)?;
     let config = CONFIG.load(deps.storage)?;
-    let mint_assets = verify_mint_funds(&info.funds, &config)?;
+    let mint_assets = verify_mint_funds(
+        &info.funds,
+        vault_assets.0.denom,
+        vault_assets.1.denom,
+        &config.min_asset0,
+        &config.min_asset1,
+    )?;
 
     // We queue up the assets for the next iteration
     let mut assets_pending = ASSETS_PENDING_MINT.load(deps.storage)?;
@@ -555,7 +602,7 @@ fn execute_create_position(
     token_min_amount1: String,
     swap: Option<Swap>,
 ) -> Result<Response, ContractError> {
-    let config = CONFIG.load(deps.storage)?;
+    let vault_assets = VAULT_ASSETS.load(deps.storage)?;
 
     if POSITION_OPEN.load(deps.storage)? {
         return Err(ContractError::PositionOpen);
@@ -566,10 +613,10 @@ fn execute_create_position(
 
     let mut balance_asset0 = deps
         .querier
-        .query_balance(env.contract.address.clone(), config.asset0.denom.clone())?;
+        .query_balance(env.contract.address.clone(), vault_assets.0.denom.clone())?;
     let mut balance_asset1 = deps
         .querier
-        .query_balance(env.contract.address.clone(), config.asset1.denom.clone())?;
+        .query_balance(env.contract.address.clone(), vault_assets.1.denom.clone())?;
 
     // execute swap if provided
     if let Some(swap) = swap {
@@ -592,7 +639,7 @@ fn execute_create_position(
 
     messages.push(
         MsgCreatePosition {
-            pool_id: config.pool_id,
+            pool_id: POOL_ID.load(deps.storage)?,
             sender: env.contract.address.to_string(),
             lower_tick,
             upper_tick,
@@ -630,7 +677,7 @@ fn execute_add_to_position(
     swap: Option<Swap>,
     override_uptime: Option<bool>,
 ) -> Result<Response, ContractError> {
-    let config = CONFIG.load(deps.storage)?;
+    let vault_assets = VAULT_ASSETS.load(deps.storage)?;
 
     let contract_address = env.contract.address;
     let mut messages: Vec<CosmosMsg> = vec![];
@@ -638,10 +685,10 @@ fn execute_add_to_position(
 
     let mut balance_asset0 = deps
         .querier
-        .query_balance(contract_address.clone(), config.asset0.denom.clone())?;
+        .query_balance(contract_address.clone(), vault_assets.0.denom.clone())?;
     let mut balance_asset1 = deps
         .querier
-        .query_balance(contract_address.clone(), config.asset1.denom.clone())?;
+        .query_balance(contract_address.clone(), vault_assets.1.denom.clone())?;
 
     // Collect rewards instead of letting them be claimed when adding to position
     let rewards = collect_rewards(
@@ -673,8 +720,8 @@ fn execute_add_to_position(
     }
 
     let tokens_provided = vec![
-        coin(amount0.parse::<u128>()?, config.asset0.denom),
-        coin(amount1.parse::<u128>()?, config.asset1.denom),
+        coin(amount0.parse::<u128>()?, vault_assets.0.denom),
+        coin(amount1.parse::<u128>()?, vault_assets.1.denom),
     ];
 
     verify_availability_of_funds(
@@ -751,7 +798,7 @@ fn execute_process_burns(deps: DepsMut, env: &Env) -> Result<Response, ContractE
 }
 
 fn execute_collect_commission(deps: DepsMut) -> Result<Response, ContractError> {
-    let config = CONFIG.load(deps.storage)?;
+    let vault_assets = VAULT_ASSETS.load(deps.storage)?;
     let mut commission_rewards = COMMISSION_REWARDS.load(deps.storage)?;
 
     commission_rewards.retain(|f| !f.amount.is_zero());
@@ -762,12 +809,12 @@ fn execute_collect_commission(deps: DepsMut) -> Result<Response, ContractError> 
 
     COMMISSION_REWARDS.save(
         deps.storage,
-        &vec![coin(0, config.asset0.denom), coin(0, config.asset1.denom)],
+        &vec![coin(0, vault_assets.0.denom), coin(0, vault_assets.1.denom)],
     )?;
 
     Ok(Response::new()
         .add_message(BankMsg::Send {
-            to_address: config.commission_receiver.to_string(),
+            to_address: CONFIG.load(deps.storage)?.commission_receiver.to_string(),
             amount: commission_rewards,
         })
         .add_attribute("action", "banana_vault_claim_commission"))
@@ -784,8 +831,6 @@ fn execute_resume(deps: DepsMut) -> Result<Response, ContractError> {
 }
 
 fn execute_unlock(deps: DepsMut, env: &Env, info: &MessageInfo) -> Result<Response, ContractError> {
-    let config: Config = CONFIG.load(deps.storage)?;
-
     // Only the operator can unlock the vault, unless the vault has not been updated for a long time
     if info.sender != OPERATOR.load(deps.storage)?
         && env.block.time.seconds() < LAST_UPDATE.load(deps.storage)? + MAX_UPDATE_INTERVAL
@@ -824,8 +869,11 @@ fn execute_unlock(deps: DepsMut, env: &Env, info: &MessageInfo) -> Result<Respon
     // if an open position exists, close it
     if POSITION_OPEN.load(deps.storage)? {
         let cl_querier = ConcentratedliquidityQuerier::new(&deps.querier);
-        let user_positions_response: UserPositionsResponse =
-            cl_querier.user_positions(env.contract.address.to_string(), config.pool_id, None)?;
+        let user_positions_response: UserPositionsResponse = cl_querier.user_positions(
+            env.contract.address.to_string(),
+            POOL_ID.load(deps.storage)?,
+            None,
+        )?;
 
         let position = user_positions_response.positions[0]
             .position
@@ -894,7 +942,10 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::Whitelist { start_after, limit } => {
             to_json_binary(&query_whitelist(deps, start_after, limit))
         }
-        QueryMsg::VaultStatus => to_json_binary(&query_vault_status(deps, &env)?),
+        QueryMsg::VaultState(state_query) => match state_query {
+            StateQuery::Info => to_json_binary(&query_info(deps)?),
+            StateQuery::Status => to_json_binary(&query_status(deps, &env)?),
+        },
     }
 }
 
@@ -908,8 +959,16 @@ fn query_locked_assets(deps: Deps, env: &Env) -> StdResult<Vec<Coin>> {
 
 fn query_estimate_mint(deps: Deps, env: &Env, coins: &[Coin]) -> StdResult<Vec<Coin>> {
     let config = CONFIG.load(deps.storage)?;
+    let vault_assets = VAULT_ASSETS.load(deps.storage)?;
 
-    let mint_funds: Vec<Coin> = verify_mint_funds(coins, &config).unwrap();
+    let mint_funds: Vec<Coin> = verify_mint_funds(
+        coins,
+        vault_assets.0.denom,
+        vault_assets.1.denom,
+        &config.min_asset0,
+        &config.min_asset1,
+    )
+    .unwrap();
 
     let (asset0, asset1) = get_vault_balances(&deps, &env.contract.address.to_string(), true)?;
 
@@ -1023,7 +1082,20 @@ fn query_whitelist(deps: Deps, start_after: Option<Addr>, limit: Option<u32>) ->
     }
 }
 
-fn query_vault_status(deps: Deps, env: &Env) -> StdResult<Status> {
+fn query_info(deps: Deps) -> StdResult<State> {
+    let vault_assets = VAULT_ASSETS.load(deps.storage)?;
+
+    Ok(State::Info {
+        asset0: vault_assets.0,
+        asset1: vault_assets.1,
+        pool_id: POOL_ID.load(deps.storage)?,
+        owner: OWNER.load(deps.storage)?,
+        operator: OPERATOR.load(deps.storage)?,
+        config: Box::new(CONFIG.load(deps.storage)?),
+    })
+}
+
+fn query_status(deps: Deps, env: &Env) -> StdResult<State> {
     let mut join_time = 0;
     let mut uptime_locked = false;
 
@@ -1032,7 +1104,7 @@ fn query_vault_status(deps: Deps, env: &Env) -> StdResult<Status> {
         let position = &cl_querier
             .user_positions(
                 env.contract.address.to_string(),
-                CONFIG.load(deps.storage)?.pool_id,
+                POOL_ID.load(deps.storage)?,
                 None,
             )?
             .positions[0];
@@ -1051,18 +1123,15 @@ fn query_vault_status(deps: Deps, env: &Env) -> StdResult<Status> {
         }
     }
 
-    Ok(Status {
+    Ok(State::Status {
         join_time,
-        last_update: LAST_UPDATE.load(deps.storage)?,
         uptime_locked,
+        last_update: LAST_UPDATE.load(deps.storage)?,
         cap_reached: CAP_REACHED.load(deps.storage)?,
         halted: HALTED.load(deps.storage)?,
-        closed: TERMINATED.load(deps.storage)?,
-        owner: OWNER.load(deps.storage)?,
-        operator: OPERATOR.load(deps.storage)?,
-        denom: VAULT_DENOM.load(deps.storage)?,
+        terminated: TERMINATED.load(deps.storage)?,
         supply: SUPPLY.load(deps.storage)?,
-        config: CONFIG.load(deps.storage)?,
+        denom: VAULT_DENOM.load(deps.storage)?,
     })
 }
 
@@ -1083,11 +1152,13 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response
 }
 
 // Helpers
-fn verify_pool(deps: &Deps, config: &Config) -> Result<(), ContractError> {
-    let pool: Pool = match PoolmanagerQuerier::new(&deps.querier)
-        .pool(config.pool_id)?
-        .pool
-    {
+fn verify_pool(
+    deps: &Deps,
+    pool_id: u64,
+    denom0: String,
+    denom1: String,
+) -> Result<(), ContractError> {
+    let pool: Pool = match PoolmanagerQuerier::new(&deps.querier).pool(pool_id)?.pool {
         Some(pool) => {
             if pool
                 .type_url
@@ -1098,39 +1169,40 @@ fn verify_pool(deps: &Deps, config: &Config) -> Result<(), ContractError> {
             prost::Message::decode(pool.value.as_slice()).unwrap()
         }
         None => {
-            return Err(ContractError::PoolNotFound {
-                pool_id: config.pool_id,
-            });
+            return Err(ContractError::PoolNotFound { pool_id });
         }
     };
 
-    if config.asset0.denom != pool.token0 {
+    if denom0 != pool.token0 {
         return Err(ContractError::InvalidConfigAsset { asset: 0 });
     }
 
-    if config.asset1.denom != pool.token1 {
+    if denom1 != pool.token1 {
         return Err(ContractError::InvalidConfigAsset { asset: 1 });
     }
 
     Ok(())
 }
 
-fn verify_mint_funds(funds: &[Coin], config: &Config) -> Result<Vec<Coin>, ContractError> {
+fn verify_mint_funds(
+    funds: &[Coin],
+    denom0: String,
+    denom1: String,
+    min0: &Uint128,
+    min1: &Uint128,
+) -> Result<Vec<Coin>, ContractError> {
     if funds.is_empty() {
         return Err(ContractError::NoFunds);
     }
 
-    let mut assets = vec![
-        coin(0, config.asset0.denom.clone()),
-        coin(0, config.asset1.denom.clone()),
-    ];
+    let mut assets = vec![coin(0, denom0.clone()), coin(0, denom1.clone())];
 
     for fund in funds {
-        if fund.denom == config.asset0.denom {
-            check_deposit_min(&config.asset0.min_deposit, fund)?;
+        if fund.denom == denom0 {
+            check_deposit_min(min0, fund)?;
             assets[0].amount = fund.amount;
-        } else if fund.denom == config.asset1.denom {
-            check_deposit_min(&config.asset1.min_deposit, fund)?;
+        } else if fund.denom == denom1 {
+            check_deposit_min(min1, fund)?;
             assets[1].amount = fund.amount;
         } else {
             return Err(ContractError::InvalidMintAssets);
@@ -1200,24 +1272,24 @@ fn verify_availability_of_funds(
         },
     ];
 
-    let config = CONFIG.load(storage)?;
+    let vault_assets = VAULT_ASSETS.load(storage)?;
 
     for token_provided in tokens_provided {
-        if token_provided.denom == config.asset0.denom
+        if token_provided.denom == vault_assets.0.denom
             && token_provided.amount > amount_asset0.checked_sub(reserved_assets[0].amount)?
         {
             return Err(ContractError::CannotAddMoreThanAvailableForAsset {
-                asset: config.asset0.denom,
+                asset: vault_assets.0.denom,
                 amount: amount_asset0
                     .checked_sub(reserved_assets[0].amount)?
                     .to_string(),
             });
         }
-        if token_provided.denom == config.asset1.denom
+        if token_provided.denom == vault_assets.1.denom
             && token_provided.amount > amount_asset1.checked_sub(reserved_assets[1].amount)?
         {
             return Err(ContractError::CannotAddMoreThanAvailableForAsset {
-                asset: config.asset1.denom,
+                asset: vault_assets.1.denom,
                 amount: amount_asset1
                     .checked_sub(reserved_assets[1].amount)?
                     .to_string(),
@@ -1234,19 +1306,19 @@ fn get_vault_balances(
     address: &String,
     include_position: bool,
 ) -> Result<(Coin, Coin), StdError> {
-    let config = CONFIG.load(deps.storage)?;
+    let vault_assets = VAULT_ASSETS.load(deps.storage)?;
     let mut asset0 = deps
         .querier
-        .query_balance(address.clone(), config.asset0.denom.clone())?;
+        .query_balance(address.clone(), vault_assets.0.denom.clone())?;
     let mut asset1 = deps
         .querier
-        .query_balance(address, config.asset1.denom.clone())?;
+        .query_balance(address, vault_assets.1.denom.clone())?;
 
     if POSITION_OPEN.load(deps.storage)? && include_position {
-        let commission_remainder = Decimal::one() - config.commission.unwrap_or(Decimal::zero());
+        let commission_remainder = Decimal::one() - COMMISSION_RATE.load(deps.storage)?;
 
         let position = &ConcentratedliquidityQuerier::new(&deps.querier)
-            .user_positions(address.to_string(), config.pool_id, None)?
+            .user_positions(address.to_string(), POOL_ID.load(deps.storage)?, None)?
             .positions[0];
 
         asset0.amount = asset0.amount.checked_add(
@@ -1268,10 +1340,10 @@ fn get_vault_balances(
 
         if !position.claimable_incentives.is_empty() {
             for incentive in &position.claimable_incentives {
-                if incentive.denom == config.asset0.denom {
+                if incentive.denom == vault_assets.0.denom {
                     asset0.amount +=
                         Uint128::from_str(&incentive.amount)?.mul_floor(commission_remainder);
-                } else if incentive.denom == config.asset1.denom {
+                } else if incentive.denom == vault_assets.1.denom {
                     asset1.amount +=
                         Uint128::from_str(&incentive.amount)?.mul_floor(commission_remainder);
                 }
@@ -1280,10 +1352,10 @@ fn get_vault_balances(
 
         if !position.claimable_spread_rewards.is_empty() {
             for incentive in &position.claimable_spread_rewards {
-                if incentive.denom == config.asset0.denom {
+                if incentive.denom == vault_assets.0.denom {
                     asset0.amount +=
                         Uint128::from_str(&incentive.amount)?.mul_floor(commission_remainder);
-                } else if incentive.denom == config.asset1.denom {
+                } else if incentive.denom == vault_assets.1.denom {
                     asset1.amount +=
                         Uint128::from_str(&incentive.amount)?.mul_floor(commission_remainder);
                 }
@@ -1301,7 +1373,7 @@ fn get_vault_balances(
                 .checked_sub(assets_pending[0].amount)?
                 .checked_sub(commissions[0].amount)?
                 .u128(),
-            config.asset0.denom.clone(),
+            vault_assets.0.denom,
         ),
         coin(
             asset1
@@ -1309,7 +1381,7 @@ fn get_vault_balances(
                 .checked_sub(assets_pending[1].amount)?
                 .checked_sub(commissions[1].amount)?
                 .u128(),
-            config.asset1.denom,
+            vault_assets.1.denom,
         ),
     ))
 }
@@ -1331,8 +1403,6 @@ fn collect_rewards(
     position_id: u64,
     override_uptime: bool,
 ) -> Result<Rewards, ContractError> {
-    let config = CONFIG.load(deps.storage)?;
-
     let position: FullPositionBreakdown = match ConcentratedliquidityQuerier::new(&deps.querier)
         .position_by_id(position_id)?
         .position
@@ -1398,16 +1468,17 @@ fn collect_rewards(
     let mut uncompounded_rewards: Coins =
         Coins::try_from(UNCOMPOUNDED_REWARDS.load(deps.storage)?).unwrap_or_default();
 
-    let commission_rate = config.commission.unwrap_or(Decimal::zero());
+    let commission_rate = COMMISSION_RATE.load(deps.storage)?;
+    let vault_assets = VAULT_ASSETS.load(deps.storage)?;
 
     for reward_coin in &reward_coins {
         let commission_amount = reward_coin.amount.mul_floor(commission_rate);
 
         // compoundable rewards. add commission to the tracker
-        if reward_coin.denom == config.asset0.denom {
+        if reward_coin.denom == vault_assets.0.denom {
             commission_coins[0].amount += commission_amount;
             amount0 = reward_coin.amount;
-        } else if reward_coin.denom == config.asset1.denom {
+        } else if reward_coin.denom == vault_assets.1.denom {
             commission_coins[1].amount += commission_amount;
             amount1 = reward_coin.amount;
 
@@ -1628,15 +1699,15 @@ fn process_burns(
     let (total_asset0, total_asset1) =
         get_vault_balances(&deps.as_ref(), &env.contract.address.to_string(), true)?;
 
-    let config = CONFIG.load(deps.storage)?;
+    let vault_assets = VAULT_ASSETS.load(deps.storage)?;
 
     let mut messages: Vec<CosmosMsg> = vec![];
     let mut attributes = vec![attr("action", "banana_vault_burn")];
 
     let mut total_burned = Uint128::zero();
     let mut distributed_vault_tokens = vec![
-        coin(0, config.asset0.denom.clone()),
-        coin(0, config.asset1.denom.clone()),
+        coin(0, vault_assets.0.denom.clone()),
+        coin(0, vault_assets.1.denom.clone()),
     ];
     let supply = SUPPLY.load(deps.storage)?;
 
@@ -1644,8 +1715,8 @@ fn process_burns(
     for (address, to_burn) in &exits {
         let ratio = Decimal::new(*to_burn).checked_div(Decimal::new(supply))?;
         let mut amount_to_send = vec![
-            coin(0, config.asset0.denom.clone()),
-            coin(0, config.asset1.denom.clone()),
+            coin(0, vault_assets.0.denom.clone()),
+            coin(0, vault_assets.1.denom.clone()),
         ];
 
         let amount_to_send_asset0 = total_asset0.amount.mul_floor(ratio);
@@ -1715,7 +1786,7 @@ fn process_burns(
         TERMINATED.save(deps.storage, &true)?;
 
     // otherwise check if we are back under the deposit cap
-    } else if let Some(dollar_cap) = config.dollar_cap {
+    } else if let Some(dollar_cap) = CONFIG.load(deps.storage)?.dollar_cap {
         let (current_price_asset0, current_price_asset1) = get_asset_prices(&deps.as_ref(), env)?;
 
         let dollars_asset0 = (total_asset0
@@ -1768,6 +1839,7 @@ fn get_vault_pricing(
 // gets the up-to-date prices for each vault asset
 fn get_asset_prices(deps: &Deps, env: &Env) -> StdResult<(Uint128, Uint128)> {
     let config = CONFIG.load(deps.storage)?;
+    let vault_assets = VAULT_ASSETS.load(deps.storage)?;
     let current_time = env.block.time.seconds();
 
     let price_querier: &dyn PriceQuerier =
@@ -1780,19 +1852,19 @@ fn get_asset_prices(deps: &Deps, env: &Env) -> StdResult<(Uint128, Uint128)> {
     let current_price_asset0 = price_querier.query_asset_price(
         &deps.querier,
         config.pyth_contract_address.clone(),
-        config.asset0.price_identifier,
+        vault_assets.0.price_identifier,
         current_time as i64,
         config.price_expiry,
-        config.asset0.decimals,
+        vault_assets.0.decimals,
     )?;
 
     let current_price_asset1 = price_querier.query_asset_price(
         &deps.querier,
         config.pyth_contract_address,
-        config.asset1.price_identifier,
+        vault_assets.1.price_identifier,
         current_time as i64,
         config.price_expiry,
-        config.asset1.decimals,
+        vault_assets.1.decimals,
     )?;
 
     Ok((current_price_asset0, current_price_asset1))

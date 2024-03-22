@@ -11,6 +11,9 @@ pub struct InstantiateMsg {
     // CL Assets with their corresponding pyth price feed
     pub asset0: VaultAsset,
     pub asset1: VaultAsset,
+    // Minimum amount of tokens that can be deposited in a single tx
+    pub min_asset0: Uint128,
+    pub min_asset1: Uint128,
     // Seconds after which a price quote is rejected and entries can't be processed
     pub price_expiry: u64,
     // Must be a CL pool
@@ -43,8 +46,6 @@ pub struct VaultAsset {
     pub price_identifier: PriceIdentifier,
     // Need to know decimals to convert from pyth price to asset price
     pub decimals: u32,
-    // The minimum amount of tokens that can be deposited in a single tx
-    pub min_deposit: Uint128,
 }
 
 #[cw_serde]
@@ -61,21 +62,28 @@ pub enum ExecuteMsg {
 
 #[cw_serde]
 pub enum VaultMsg {
-    ModifyConfig(Box<Config>),
-    ModifyOperator(Addr),
+    // Modify the vault config
+    Modify(ModifyMsg),
     CompoundRewards(Vec<Swap>),
     CollectCommission,
     // Process entries and exits
     ProcessMints,
     ProcessBurns,
-    // Manage addresses whitelisted to exceed deposit limits
+    // Halt and Resume deposits and exits
+    Halt,
+    Resume,
+}
+
+#[cw_serde]
+pub enum ModifyMsg {
+    Operator(Addr),
+    Config(Box<Config>),
+    PoolId(u64),
+    Commission(Decimal),
     Whitelist {
         add: Option<Vec<Addr>>,
         remove: Option<Vec<Addr>>,
     },
-    // Halt and Resume deposits and exits
-    Halt,
-    Resume,
 }
 
 #[cw_serde]
@@ -136,8 +144,8 @@ pub enum QueryMsg {
         start_after: Option<Addr>,
         limit: Option<u32>,
     },
-    #[returns(Status)]
-    VaultStatus,
+    #[returns(State)]
+    VaultState(StateQuery),
 }
 
 #[cw_serde]
@@ -178,18 +186,31 @@ pub struct WhitelistResponse {
 }
 
 #[cw_serde]
-pub struct Status {
-    pub join_time: u64,
-    pub last_update: u64,
-    pub uptime_locked: bool,
-    pub cap_reached: bool,
-    pub halted: bool,
-    pub closed: bool,
-    pub denom: String,
-    pub supply: Uint128,
-    pub owner: Addr,
-    pub operator: Addr,
-    pub config: Config,
+pub enum State {
+    Info {
+        asset0: VaultAsset,
+        asset1: VaultAsset,
+        pool_id: u64,
+        owner: Addr,
+        operator: Addr,
+        config: Box<Config>,
+    },
+    Status {
+        join_time: u64,
+        last_update: u64,
+        uptime_locked: bool,
+        cap_reached: bool,
+        halted: bool,
+        terminated: bool,
+        supply: Uint128,
+        denom: String,
+    },
+}
+
+#[cw_serde]
+pub enum StateQuery {
+    Info,
+    Status,
 }
 
 #[cw_serde]

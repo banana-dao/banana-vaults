@@ -23,6 +23,9 @@ pub enum ContractError {
     #[error("Pool is not a Concentrated Liquidity Pool")]
     PoolIsNotCL,
 
+    #[error("Commission rate can't be set to 100% or more")]
+    CommissionTooHigh,
+
     #[error("Funds must be sent to participate in the vault")]
     NoFunds,
 

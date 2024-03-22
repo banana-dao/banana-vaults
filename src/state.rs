@@ -11,19 +11,22 @@ pub enum TopKey {
     Owner = b'a',
     Operator = b'b',
     Config = b'c',
-    VaultDenom = b'd',
-    Supply = b'e',
-    LastUpdate = b'f',
-    AssetPendingMint = b'g',
-    AccountsPendingMint = b'h',
-    AccountsPendingBurn = b'i',
-    WhitelistedDepositors = b'j',
-    CapReached = b'k',
-    Halted = b'l',
-    Terminated = b'm',
-    PositionOpen = b'n',
-    CommissionRewards = b'o',
-    UncompoundedRewards = b'p',
+    PoolId = b'd',
+    VaultAssets = b'e',
+    CommissionRate = b'f',
+    CommissionRewards = b'g',
+    UncompoundedRewards = b'h',
+    WhitelistedDepositors = b'i',
+    VaultDenom = b'j',
+    Supply = b'k',
+    LastUpdate = b'l',
+    AssetPendingMint = b'm',
+    AccountsPendingMint = b'n',
+    AccountsPendingBurn = b'o',
+    PositionOpen = b'p',
+    CapReached = b'q',
+    Halted = b'r',
+    Terminated = b's',
 }
 
 impl TopKey {
@@ -42,7 +45,19 @@ pub const OWNER: Item<Addr> = Item::new(TopKey::Owner.as_str());
 pub const OPERATOR: Item<Addr> = Item::new(TopKey::Operator.as_str());
 // Contract Config
 pub const CONFIG: Item<Config> = Item::new(TopKey::Config.as_str());
+// CL pool id
+pub const POOL_ID: Item<u64> = Item::new(TopKey::PoolId.as_str());
+// Assets that can be deposited in the vault
+pub const VAULT_ASSETS: Item<(VaultAsset, VaultAsset)> = Item::new(TopKey::VaultAssets.as_str());
 // Tokenfactory denom for the vault token
+// rate to charge for the vault
+pub const COMMISSION_RATE: Item<Decimal> = Item::new(TopKey::CommissionRate.as_str());
+// collected commissions
+pub const COMMISSION_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::CommissionRewards.as_str());
+// collected rewards that are not asset0 or asset1
+pub const UNCOMPOUNDED_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::UncompoundedRewards.as_str());
+pub const WHITELISTED_DEPOSITORS: Map<Addr, Empty> =
+    Map::new(TopKey::WhitelistedDepositors.as_str());
 pub const VAULT_DENOM: Item<String> = Item::new(TopKey::VaultDenom.as_str());
 // Total supply of vault tokens
 pub const SUPPLY: Item<Uint128> = Item::new(TopKey::Supply.as_str());
@@ -56,32 +71,24 @@ pub const ACCOUNTS_PENDING_MINT: Map<Addr, (Vec<Coin>, Uint128)> =
 // Addresses pending to leave the vault
 pub const ACCOUNTS_PENDING_BURN: Map<Addr, Uint128> =
     Map::new(TopKey::AccountsPendingBurn.as_str());
-pub const WHITELISTED_DEPOSITORS: Map<Addr, Empty> =
-    Map::new(TopKey::WhitelistedDepositors.as_str());
+// Flag to indicate if the vault has an active position
+pub const POSITION_OPEN: Item<bool> = Item::new(TopKey::PositionOpen.as_str());
 // Flag to indicate if the vault cap has been reached and no more people can join (they can leave though)
 pub const CAP_REACHED: Item<bool> = Item::new(TopKey::CapReached.as_str());
 // Flag to halt joins and exits (in case of some emergency)
 pub const HALTED: Item<bool> = Item::new(TopKey::Halted.as_str());
 // Flag to indicate that the vault has been terminated by owner
 pub const TERMINATED: Item<bool> = Item::new(TopKey::Terminated.as_str());
-// Flag to indicate if the vault has an active position
-pub const POSITION_OPEN: Item<bool> = Item::new(TopKey::PositionOpen.as_str());
-// collected commissions
-pub const COMMISSION_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::CommissionRewards.as_str());
-// collected rewards that are not asset0 or asset1
-pub const UNCOMPOUNDED_REWARDS: Item<Vec<Coin>> = Item::new(TopKey::UncompoundedRewards.as_str());
 
 #[cw_serde]
 pub struct Config {
     pub metadata: Option<Metadata>,
-    pub pool_id: u64,
-    pub asset0: VaultAsset,
-    pub asset1: VaultAsset,
+    pub min_asset0: Uint128,
+    pub min_asset1: Uint128,
     pub min_redemption: Option<Uint128>,
     pub dollar_cap: Option<Uint128>,
     pub pyth_contract_address: Addr,
     pub price_expiry: u64,
-    pub commission: Option<Decimal>,
     pub commission_receiver: Addr,
 }
 
