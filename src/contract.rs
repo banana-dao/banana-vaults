@@ -19,7 +19,7 @@ use cosmwasm_std::{
 };
 use cw2::{get_contract_version, set_contract_version};
 use cw_storage_plus::Bound;
-use osmosis_std_modified::types::osmosis::{
+use osmosis_std::types::osmosis::{
     concentratedliquidity::v1beta1::{
         ConcentratedliquidityQuerier, FullPositionBreakdown, MsgAddToPosition,
         MsgCollectIncentives, MsgCollectSpreadRewards, MsgCreatePosition, Pool,
@@ -28,7 +28,7 @@ use osmosis_std_modified::types::osmosis::{
     poolmanager::v1beta1::{MsgSplitRouteSwapExactAmountIn, PoolmanagerQuerier},
     tokenfactory::v1beta1::{MsgBurn, MsgCreateDenom, MsgMint},
 };
-use osmosis_std_modified::types::{
+use osmosis_std::types::{
     cosmos::base::v1beta1::Coin as CosmosCoin,
     osmosis::concentratedliquidity::v1beta1::MsgWithdrawPosition,
 };
@@ -134,7 +134,7 @@ pub fn instantiate(
 
     let mint_msg: CosmosMsg = MsgMint {
         sender: env.contract.address.clone().into_string(),
-        amount: Some(osmosis_std_modified::types::cosmos::base::v1beta1::Coin {
+        amount: Some(osmosis_std::types::cosmos::base::v1beta1::Coin {
             denom: vault_denom.clone(),
             amount: initial_mint.to_string(),
         }),
@@ -1261,7 +1261,7 @@ fn verify_availability_of_funds(
     let assets_pending = ASSETS_PENDING_MINT.load(storage)?;
     let commissions = COMMISSION_REWARDS.load(storage)?;
 
-    let reserved_assets = vec![
+    let reserved_assets = [
         Coin {
             denom: assets_pending[0].denom.clone(),
             amount: assets_pending[0].amount + commissions[0].amount,
@@ -1648,7 +1648,7 @@ fn process_mints(
                 messages.push(
                     MsgMint {
                         sender: env.contract.address.to_string(),
-                        amount: Some(osmosis_std_modified::types::cosmos::base::v1beta1::Coin {
+                        amount: Some(osmosis_std::types::cosmos::base::v1beta1::Coin {
                             denom: VAULT_DENOM.load(deps.storage)?,
                             amount: to_mint.to_string(),
                         }),
@@ -1705,7 +1705,7 @@ fn process_burns(
     let mut attributes = vec![attr("action", "banana_vault_burn")];
 
     let mut total_burned = Uint128::zero();
-    let mut distributed_vault_tokens = vec![
+    let mut distributed_vault_tokens = [
         coin(0, vault_assets.0.denom.clone()),
         coin(0, vault_assets.1.denom.clone()),
     ];
@@ -1763,7 +1763,7 @@ fn process_burns(
         messages.push(
             MsgBurn {
                 sender: env.contract.address.to_string(),
-                amount: Some(osmosis_std_modified::types::cosmos::base::v1beta1::Coin {
+                amount: Some(osmosis_std::types::cosmos::base::v1beta1::Coin {
                     denom: VAULT_DENOM.load(deps.storage)?,
                     amount: total_burned.to_string(),
                 }),

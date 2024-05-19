@@ -1,6 +1,6 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Addr, Coin, Decimal, Uint128};
-use osmosis_std_modified::types::osmosis::poolmanager::v1beta1::SwapAmountInSplitRoute;
+use osmosis_std::types::osmosis::poolmanager::v1beta1::SwapAmountInSplitRoute;
 use pyth_sdk_cw::PriceIdentifier;
 
 use crate::state::{Config, Metadata};
