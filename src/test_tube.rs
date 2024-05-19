@@ -9,13 +9,13 @@ use crate::{
 };
 use cosmos_sdk_proto::cosmos::params::v1beta1::ParameterChangeProposal;
 use cosmwasm_std::{coin, Addr, Coin, Decimal, Uint128};
-use osmosis_std_modified::types::{
+use osmosis_std::types::{
     cosmos::bank::v1beta1::MsgSend,
     osmosis::concentratedliquidity::v1beta1::{MsgCreatePosition, UserPositionsRequest},
 };
-use osmosis_test_tube::osmosis_std_modified::types::cosmos::bank::v1beta1::QueryBalanceRequest;
+use osmosis_test_tube::osmosis_std::types::cosmos::bank::v1beta1::QueryBalanceRequest;
 use osmosis_test_tube::{
-    osmosis_std_modified::types::osmosis::concentratedliquidity::poolmodel::concentrated::v1beta1::MsgCreateConcentratedPool,
+    osmosis_std::types::osmosis::concentratedliquidity::poolmodel::concentrated::v1beta1::MsgCreateConcentratedPool,
     Account, Bank, ConcentratedLiquidity, FeeSetting, GovWithAppAccess, Module, OsmosisTestApp,
     SigningAccount, Wasm,
 };

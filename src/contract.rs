@@ -18,7 +18,7 @@ use cosmwasm_std::{
 use cw2::{get_contract_version, set_contract_version};
 use cw_ownable::{assert_owner, get_ownership, initialize_owner, update_ownership, Action};
 use cw_storage_plus::Bound;
-use osmosis_std_modified::types::osmosis::{
+use osmosis_std::types::osmosis::{
     concentratedliquidity::v1beta1::{
         ConcentratedliquidityQuerier, FullPositionBreakdown, MsgAddToPosition,
         MsgCollectIncentives, MsgCollectSpreadRewards, MsgCreatePosition, Pool,
@@ -26,7 +26,7 @@ use osmosis_std_modified::types::osmosis::{
     },
     poolmanager::v1beta1::{MsgSplitRouteSwapExactAmountIn, PoolmanagerQuerier},
 };
-use osmosis_std_modified::types::{
+use osmosis_std::types::{
     cosmos::base::v1beta1::Coin as CosmosCoin,
     osmosis::concentratedliquidity::v1beta1::MsgWithdrawPosition,
 };
