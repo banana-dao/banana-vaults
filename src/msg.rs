@@ -114,7 +114,9 @@ pub enum PositionMsg {
 
 #[cw_serde]
 pub enum DepositMsg {
-    Mint(Option<Uint128>),
+    Mint {
+        min_out: Option<Uint128>,
+    },
     Burn {
         address: Option<Addr>,
         amount: Option<Uint128>,
@@ -156,15 +158,15 @@ pub enum DepositQuery {
 
 #[cw_serde]
 pub enum AccountQuery {
-    Mint {
-        address: Option<Addr>,
-        start_after: Option<Addr>,
-        limit: Option<u32>,
-    },
-    Burn {
-        start_after: Option<Addr>,
-        limit: Option<u32>,
-    },
+    Mint(AccountQueryParams),
+    Burn(AccountQueryParams),
+}
+
+#[cw_serde]
+pub struct AccountQueryParams {
+    pub address: Option<Addr>,
+    pub start_after: Option<Addr>,
+    pub limit: Option<u32>,
 }
 
 #[cw_serde]
@@ -193,6 +195,7 @@ pub enum State {
         pool_id: u64,
         owner: Addr,
         operator: Addr,
+        commission_rate: Decimal,
         config: Box<Config>,
     },
     Status {

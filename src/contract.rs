@@ -198,7 +198,9 @@ pub fn execute(
                     ModifyMsg::Operator(operator) => execute_modify_operator(deps, &operator),
                     ModifyMsg::Config(config) => execute_modify_config(deps, &env, &config),
                     ModifyMsg::PoolId(pool_id) => execute_modify_pool_id(deps, pool_id),
-                    ModifyMsg::Commission(commission) => execute_modify_commission(deps, commission),
+                    ModifyMsg::Commission(commission) => {
+                        execute_modify_commission(deps, commission)
+                    }
                     ModifyMsg::Whitelist { add, remove } => execute_whitelist(deps, add, remove),
                 },
                 VaultMsg::CompoundRewards(swap) => execute_compound_rewards(deps, &env, swap),
@@ -267,7 +269,7 @@ pub fn execute(
             }
         }
         ExecuteMsg::Deposit(deposit_msg) => match deposit_msg {
-            DepositMsg::Mint(min_out) => execute_deposit_for_mint(deps, &info, &min_out),
+            DepositMsg::Mint { min_out } => execute_deposit_for_mint(deps, &info, &min_out),
             DepositMsg::Burn { address, amount } => {
                 execute_deposit_for_burn(deps, &env, &info, address, amount)
             }
@@ -331,7 +333,10 @@ fn execute_modify_pool_id(deps: DepsMut, new_pool_id: u64) -> Result<Response, C
         .add_attribute("new_pool_id", new_pool_id.to_string()))
 }
 
-fn execute_modify_commission(deps: DepsMut, new_commission: Decimal) -> Result<Response, ContractError> {
+fn execute_modify_commission(
+    deps: DepsMut,
+    new_commission: Decimal,
+) -> Result<Response, ContractError> {
     if new_commission >= Decimal::percent(100) {
         return Err(ContractError::CommissionTooHigh);
     }
@@ -926,14 +931,18 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         },
         QueryMsg::LockedAssets => to_json_binary(&query_locked_assets(deps, &env)?),
         QueryMsg::AccountStatus(pending_query) => match pending_query {
-            AccountQuery::Mint {
-                address,
-                start_after,
-                limit,
-            } => to_json_binary(&query_pending_mint(deps, address, start_after, limit)?),
-            AccountQuery::Burn { start_after, limit } => {
-                to_json_binary(&query_pending_burn(deps, start_after, limit)?)
-            }
+            AccountQuery::Mint(mint) => to_json_binary(&query_pending_mint(
+                deps,
+                mint.address,
+                mint.start_after,
+                mint.limit,
+            )?),
+            AccountQuery::Burn(burn) => to_json_binary(&query_pending_burn(
+                deps,
+                burn.address,
+                burn.start_after,
+                burn.limit,
+            )?),
         },
         QueryMsg::Rewards(reward_query) => match reward_query {
             RewardQuery::Commission => to_json_binary(&query_commission_rewards(deps)?),
@@ -1036,16 +1045,27 @@ fn query_pending_mint(
 
 fn query_pending_burn(
     deps: Deps,
+    address: Option<Addr>,
     start_after: Option<Addr>,
     limit: Option<u32>,
 ) -> StdResult<Vec<AccountResponse>> {
     let limit = limit.unwrap_or(MAX_PAGE_LIMIT).min(MAX_PAGE_LIMIT);
     let start = start_after.map(Bound::exclusive);
-    let pending_burn: Vec<(Addr, Uint128)> = ACCOUNTS_PENDING_BURN
-        .range(deps.storage, start, None, Order::Ascending)
-        .take(limit as usize)
-        .filter_map(Result::ok)
-        .collect();
+
+    let pending_burn: Vec<(Addr, Uint128)> = match address {
+        Some(addr) => {
+            if let Some(pending) = ACCOUNTS_PENDING_BURN.may_load(deps.storage, addr.clone())? {
+                vec![(addr, pending)]
+            } else {
+                vec![]
+            }
+        }
+        None => ACCOUNTS_PENDING_BURN
+            .range(deps.storage, start, None, Order::Ascending)
+            .take(limit as usize)
+            .filter_map(Result::ok)
+            .collect(),
+    };
 
     let denom = VAULT_DENOM.load(deps.storage)?;
 
@@ -1084,6 +1104,7 @@ fn query_whitelist(deps: Deps, start_after: Option<Addr>, limit: Option<u32>) ->
 
 fn query_info(deps: Deps) -> StdResult<State> {
     let vault_assets = VAULT_ASSETS.load(deps.storage)?;
+    let commission_rate = COMMISSION_RATE.load(deps.storage)?;
 
     Ok(State::Info {
         asset0: vault_assets.0,
@@ -1091,6 +1112,7 @@ fn query_info(deps: Deps) -> StdResult<State> {
         pool_id: POOL_ID.load(deps.storage)?,
         owner: OWNER.load(deps.storage)?,
         operator: OPERATOR.load(deps.storage)?,
+        commission_rate,
         config: Box::new(CONFIG.load(deps.storage)?),
     })
 }
@@ -1743,10 +1765,9 @@ fn process_burns(
 
         attributes.push(attr("address", address.to_string()));
         attributes.push(attr("burned", to_burn.to_string()));
-        attributes.push(attr(
-            "received",
-            format!("{},{}", amount_to_send[0], amount_to_send[1]),
-        ));
+        for amount in amount_to_send {
+            attributes.push(attr("received", format!("{}", amount)));
+        }
 
         total_burned += to_burn;
     }

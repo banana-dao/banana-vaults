@@ -1,15 +1,15 @@
 use crate::msg::{
-    DepositMsg, Environment,
+    AccountQuery, AccountQueryParams, AccountResponse, DepositMsg, Environment,
     ExecuteMsg::{Deposit, ManagePosition, ManageVault},
     InstantiateMsg,
     PositionMsg::{CreatePosition, WithdrawPosition},
-    QueryMsg::LockedAssets,
+    QueryMsg::{AccountStatus, LockedAssets},
     VaultAsset, VaultMsg,
 };
 use cosmos_sdk_proto::cosmos::params::v1beta1::ParameterChangeProposal;
 use cosmwasm_std::{coin, Addr, Coin, Coins, Decimal, Uint128};
 use osmosis_std::types::{
-    cosmos::bank::v1beta1::MsgSend,
+    cosmos::bank::v1beta1::{MsgSend, QueryTotalSupplyRequest},
     osmosis::concentratedliquidity::v1beta1::{MsgCreatePosition, UserPositionsRequest},
 };
 use osmosis_test_tube::osmosis_std::types::cosmos::bank::v1beta1::QueryBalanceRequest;
@@ -326,7 +326,7 @@ fn execute_joins(
             .wasm
             .execute(
                 &test_env.contract_addr,
-                &Deposit(DepositMsg::Mint(None)),
+                &Deposit(DepositMsg::Mint { min_out: None }),
                 &[coin(join_amounts.0[i] * exp, join_denom)],
                 user,
             )
@@ -675,7 +675,7 @@ fn test_multiple_recalculations() {
         .wasm
         .execute(
             &test_env.contract_addr,
-            &Deposit(DepositMsg::Mint(None)),
+            &Deposit(DepositMsg::Mint { min_out: None }),
             &[coin(53_000_000, "uatom"), coin(500_000_000, "uosmo")],
             &user,
         )
@@ -845,23 +845,37 @@ fn test_queries() {
         )
         .unwrap();
 
-    // let pendings_exits: Vec<Addr> = modules
-    //     .wasm
-    //     .query(&test_env.contract_addr, &AccountsPendingExit {})
-    //     .unwrap();
+    let pendings_exits: Vec<AccountResponse> = modules
+        .wasm
+        .query(
+            &test_env.contract_addr,
+            &AccountStatus(AccountQuery::Burn(AccountQueryParams {
+                address: None,
+                start_after: None,
+                limit: None,
+            })),
+        )
+        .unwrap();
 
-    // assert_eq!(pendings_exits.len(), 1);
+    assert_eq!(pendings_exits.len(), 1);
 
     // checks if user ratio converted to dollars accurately represents the funds they leave with
-    // let user_ratio: Decimal = modules
-    //     .wasm
-    //     .query(
-    //         &test_env.contract_addr,
-    //         &VaultRatio {
-    //             address: Addr::unchecked(test_env.users[0].address()),
-    //         },
-    //     )
-    //     .unwrap();
+    // user ratio is determined by their share of the vault token supply
+    let supply = modules
+        .bank
+        .query_total_supply(&QueryTotalSupplyRequest { pagination: None })
+        .unwrap()
+        .supply
+        .iter()
+        .find(|c| c.denom == format!("factory/{}/BVT", test_env.contract_addr))
+        .unwrap()
+        .amount
+        .parse::<u128>()
+        .unwrap();
+
+    let user_ratio = Decimal::from_ratio(bvt_balance, supply);
+
+    println!("user ratio: {}", user_ratio);
 
     let contract_balance: Vec<Coin> = modules
         .wasm
@@ -891,12 +905,12 @@ fn test_queries() {
         ))
         .mul(get_price("uatom"));
 
-    // assert!(
-    //     final_dollar_balance - dollar_balance
-    //         >= user_ratio
-    //             .mul(contract_dollar_value)
-    //             .mul(PRECISION.0.div(PRECISION.1))
-    // );
+    assert!(
+        final_dollar_balance - dollar_balance
+            >= user_ratio
+                .mul(contract_dollar_value)
+                .mul(PRECISION.0.div(PRECISION.1))
+    );
 
     // check that TotalAssetsResponse return the value of assets we can use
     let new_contract_balance: Vec<Coin> = modules
