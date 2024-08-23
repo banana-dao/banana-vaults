@@ -1,21 +1,20 @@
-use crate::{
-    msg::{
-        ExecuteMsg::{CreatePosition, Join, Leave, ModifyConfig, WithdrawPosition},
-        InstantiateMsg,
-        QueryMsg::{AccountsPendingExit, TotalActiveAssets, VaultRatio},
-        TotalAssetsResponse, VaultAsset,
-    },
-    state::Config,
+use crate::msg::{
+    AccountQuery, AccountQueryParams, AccountResponse, DepositMsg, Environment,
+    ExecuteMsg::{Deposit, ManagePosition, ManageVault},
+    InstantiateMsg,
+    PositionMsg::{CreatePosition, WithdrawPosition},
+    QueryMsg::{AccountStatus, LockedAssets},
+    VaultAsset, VaultMsg,
 };
 use cosmos_sdk_proto::cosmos::params::v1beta1::ParameterChangeProposal;
-use cosmwasm_std::{coin, Addr, Coin, Decimal, Uint128};
-use osmosis_std_modified::types::{
-    cosmos::bank::v1beta1::MsgSend,
+use cosmwasm_std::{coin, Addr, Coin, Coins, Decimal, Uint128};
+use osmosis_std::types::{
+    cosmos::bank::v1beta1::{MsgSend, QueryTotalSupplyRequest},
     osmosis::concentratedliquidity::v1beta1::{MsgCreatePosition, UserPositionsRequest},
 };
-use osmosis_test_tube::osmosis_std_modified::types::cosmos::bank::v1beta1::QueryBalanceRequest;
+use osmosis_test_tube::osmosis_std::types::cosmos::bank::v1beta1::QueryBalanceRequest;
 use osmosis_test_tube::{
-    osmosis_std_modified::types::osmosis::concentratedliquidity::poolmodel::concentrated::v1beta1::MsgCreateConcentratedPool,
+    osmosis_std::types::osmosis::concentratedliquidity::poolmodel::concentrated::v1beta1::MsgCreateConcentratedPool,
     Account, Bank, ConcentratedLiquidity, FeeSetting, GovWithAppAccess, Module, OsmosisTestApp,
     SigningAccount, Wasm,
 };
@@ -30,7 +29,8 @@ struct TestEnv {
     users: Vec<SigningAccount>,
 }
 
-// arbitrary precision for comparing dollar amounts (99.9999%)
+// arbitrary precision for comparing dollar amounts
+// 99.9999% = 999999 / 1000000
 const PRECISION: (Decimal, Decimal) = (
     Decimal::new(Uint128::new(999999)),
     Decimal::new(Uint128::new(1000000)),
@@ -209,11 +209,11 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
         .instantiate(
             code_id,
             &InstantiateMsg {
-                name: "Banana Vault".to_string(),
-                description: None,
-                image: None,
+                metadata: None,
                 pool_id: 1,
                 price_expiry: 60,
+                min_asset0: 10000_u64.into(),
+                min_asset1: 10000_u64.into(),
                 asset0: VaultAsset {
                     denom: "uosmo".to_string(),
                     price_identifier: PriceIdentifier::from_hex(
@@ -221,18 +221,18 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
                     )
                     .unwrap(),
                     decimals: 6,
-                    min_deposit: 1000000_u64.into(),
                 },
                 asset1: asset1.clone(),
-                dollar_cap: Some(Uint128::from(500000000000_u128)),
+                min_redemption: None,
+                dollar_cap: None,
                 commission: Some(Decimal::from_ratio(1_u128, 100_u128)),
                 commission_receiver: Some(Addr::unchecked(test_env.admin.address())),
-                mainnet: Some(false),
+                env: Some(Environment::Testtube),
                 operator: Addr::unchecked(test_env.admin.address()),
             },
             Some(&test_env.admin.address()),
             Some("bv"),
-            &[coin(1_000_000, "uosmo")],
+            &[coin(100_000_000, "uosmo")],
             &test_env.admin,
         )
         .unwrap()
@@ -251,41 +251,6 @@ fn setup_contract(asset1: VaultAsset) -> TestEnv {
         )
         .unwrap();
 
-    // modify the config to set the mock oracle address
-    modules
-        .wasm
-        .execute(
-            &contract_addr,
-            &ModifyConfig {
-                config: Box::new(Config {
-                    name: "Banana Vault".to_string(),
-                    description: None,
-                    image: None,
-                    pool_id: 1,
-                    asset0: VaultAsset {
-                        denom: "uosmo".to_string(),
-                        price_identifier: PriceIdentifier::from_hex(
-                            "5867f5683c757393a0670ef0f701490950fe93fdb006d181c8265a831ac0c5c6",
-                        )
-                        .unwrap(),
-                        decimals: 6,
-                        min_deposit: 1000000_u64.into(),
-                    },
-                    asset1,
-                    dollar_cap: None,
-                    commission: Some(Decimal::from_ratio(1_u128, 100_u128)),
-                    commission_receiver: Addr::unchecked(test_env.admin.address()),
-                    pyth_contract_address: Addr::unchecked(
-                        "osmo1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqmcn030",
-                    ),
-                    price_expiry: 60,
-                }),
-            },
-            &[],
-            &test_env.admin,
-        )
-        .unwrap();
-
     test_env.contract_addr = contract_addr;
     test_env
 }
@@ -299,7 +264,6 @@ fn get_asset(denom: &str) -> VaultAsset {
             )
             .unwrap(),
             decimals: 6,
-            min_deposit: 1000000_u64.into(),
         },
         "wei" => VaultAsset {
             denom: "wei".to_string(),
@@ -308,7 +272,6 @@ fn get_asset(denom: &str) -> VaultAsset {
             )
             .unwrap(),
             decimals: 18,
-            min_deposit: 1000000_u64.into(),
         },
         _ => panic!("invalid denom"),
     }
@@ -363,20 +326,54 @@ fn execute_joins(
             .wasm
             .execute(
                 &test_env.contract_addr,
-                &Join {},
+                &Deposit(DepositMsg::Mint { min_out: None }),
                 &[coin(join_amounts.0[i] * exp, join_denom)],
                 user,
             )
             .unwrap();
     }
+    modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &ManageVault(VaultMsg::ProcessMints),
+            &[],
+            &test_env.admin,
+        )
+        .unwrap();
+
     initial_balances
 }
 
 fn execute_leaves(test_env: &TestEnv, modules: &Modules) {
     for user in &test_env.users {
+        let bvt_balance = modules
+            .bank
+            .query_balance(&QueryBalanceRequest {
+                address: user.address(),
+                denom: format!("factory/{}/BVT", test_env.contract_addr),
+            })
+            .unwrap()
+            .balance
+            .unwrap()
+            .amount
+            .parse::<u128>()
+            .unwrap();
+
         modules
             .wasm
-            .execute(&test_env.contract_addr, &Leave { address: None }, &[], user)
+            .execute(
+                &test_env.contract_addr,
+                &Deposit(DepositMsg::Burn {
+                    address: None,
+                    amount: None,
+                }),
+                &[coin(
+                    bvt_balance,
+                    format!("factory/{}/BVT", test_env.contract_addr),
+                )],
+                user,
+            )
             .unwrap();
     }
 }
@@ -407,14 +404,14 @@ fn create_position(test_env: &TestEnv, modules: &Modules) {
         .wasm
         .execute(
             &test_env.contract_addr,
-            &CreatePosition {
+            &ManagePosition(CreatePosition {
                 lower_tick: 2000,
                 upper_tick: 3000,
                 tokens_provided: vec![coin(1, "uosmo")],
                 token_min_amount0: "0".to_string(),
                 token_min_amount1: "0".to_string(),
                 swap: None,
-            },
+            }),
             &[],
             &test_env.admin,
         )
@@ -439,16 +436,27 @@ fn withdraw_position(update: bool, test_env: &TestEnv, modules: &Modules) {
         .wasm
         .execute(
             &test_env.contract_addr,
-            &WithdrawPosition {
+            &ManagePosition(WithdrawPosition {
                 position_id: position.position_id,
                 liquidity_amount: position.liquidity,
-                update_users: Some(update),
                 override_uptime: None,
-            },
+            }),
             &[],
             &test_env.admin,
         )
         .unwrap();
+
+    if update {
+        modules
+            .wasm
+            .execute(
+                &test_env.contract_addr,
+                &ManageVault(VaultMsg::ProcessBurns),
+                &[],
+                &test_env.admin,
+            )
+            .unwrap();
+    }
 }
 
 // withdraw and create position to trigger ratio calculation
@@ -474,17 +482,15 @@ fn test_join_and_leave() {
     let modules = get_modules(&test_env);
 
     for (i, join_amounts) in JOINS.iter().enumerate() {
-        let initial_contract_balance: TotalAssetsResponse = modules
+        let initial_contract_balance: Vec<Coin> = modules
             .wasm
-            .query(&test_env.contract_addr, &TotalActiveAssets {})
+            .query(&test_env.contract_addr, &LockedAssets {})
             .unwrap();
 
-        let initial_contract_dollar_value = initial_contract_balance
-            .asset0
+        let initial_contract_dollar_value = initial_contract_balance[0]
             .amount
             .mul_floor(get_price("uosmo"))
-            + initial_contract_balance
-                .asset1
+            + initial_contract_balance[1]
                 .amount
                 .mul_floor(get_price("uatom"));
 
@@ -544,26 +550,20 @@ fn test_join_and_leave() {
             .all(|(fin, initial)| fin >= &(initial.mul(PRECISION.0.div(PRECISION.1)))));
 
         // check that the contract balance is also correct
-        let final_contract_balance: TotalAssetsResponse = modules
+        let final_contract_balance: Vec<Coin> = modules
             .wasm
-            .query(&test_env.contract_addr, &TotalActiveAssets {})
+            .query(&test_env.contract_addr, &LockedAssets {})
             .unwrap();
 
-        let final_dollar_value = final_contract_balance
-            .asset0
+        let final_dollar_value = final_contract_balance[0]
             .amount
             .mul_floor(get_price("uosmo"))
-            + final_contract_balance
-                .asset1
+            + final_contract_balance[1]
                 .amount
                 .mul_floor(get_price("uatom"));
 
         assert!(
-            final_dollar_value
-                >= initial_contract_dollar_value
-                    .mul(Uint128::new(99999))
-                    .checked_div(Uint128::new(100000))
-                    .unwrap()
+            final_dollar_value >= initial_contract_dollar_value.mul(PRECISION.0.div(PRECISION.1))
         );
     }
 }
@@ -574,14 +574,14 @@ fn test_join_and_leave_with_18_exp() {
     let modules = get_modules(&test_env);
 
     for (i, join_amounts) in WEI_JOINS.iter().enumerate() {
-        let initial_contract_balance: TotalAssetsResponse = modules
+        let initial_contract_balance: Vec<Coin> = modules
             .wasm
-            .query(&test_env.contract_addr, &TotalActiveAssets {})
+            .query(&test_env.contract_addr, &LockedAssets {})
             .unwrap();
 
-        let initial_contract_dollar_value = Decimal::new(initial_contract_balance.asset0.amount)
+        let initial_contract_dollar_value = Decimal::new(initial_contract_balance[0].amount)
             .mul(get_price("uosmo"))
-            + Decimal::new(initial_contract_balance.asset1.amount).mul(get_price("wei"));
+            + Decimal::new(initial_contract_balance[1].amount).mul(get_price("wei"));
 
         let uosmo_initial_balances = execute_joins(
             &test_env,
@@ -629,20 +629,17 @@ fn test_join_and_leave_with_18_exp() {
         assert!(final_dollar_value
             .iter()
             .zip(initial_dollar_value.iter())
-            .all(|(fin, initial)| fin
-                >= &(initial
-                    .mul(Uint128::new(99999))
-                    .checked_div(Uint128::new(100000))
-                    .unwrap())));
+            .all(|(&fin, &initial)| Decimal::new(fin)
+                >= Decimal::new(initial).mul(PRECISION.0.div(PRECISION.1))));
 
-        let final_contract_balance: TotalAssetsResponse = modules
+        let final_contract_balance: Vec<Coin> = modules
             .wasm
-            .query(&test_env.contract_addr, &TotalActiveAssets {})
+            .query(&test_env.contract_addr, &LockedAssets {})
             .unwrap();
 
-        let final_dollar_value = Decimal::new(final_contract_balance.asset0.amount)
+        let final_dollar_value = Decimal::new(final_contract_balance[0].amount)
             .mul(get_price("uosmo"))
-            + Decimal::new(final_contract_balance.asset1.amount).mul(get_price("wei"));
+            + Decimal::new(final_contract_balance[1].amount).mul(get_price("wei"));
 
         assert!(
             final_dollar_value >= initial_contract_dollar_value.mul(PRECISION.0.div(PRECISION.1))
@@ -678,9 +675,19 @@ fn test_multiple_recalculations() {
         .wasm
         .execute(
             &test_env.contract_addr,
-            &Join {},
+            &Deposit(DepositMsg::Mint { min_out: None }),
             &[coin(53_000_000, "uatom"), coin(500_000_000, "uosmo")],
             &user,
+        )
+        .unwrap();
+
+    modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &ManageVault(VaultMsg::ProcessMints),
+            &[],
+            &test_env.admin,
         )
         .unwrap();
 
@@ -704,12 +711,31 @@ fn test_multiple_recalculations() {
         cycle_positions(&test_env, &modules, true);
     }
 
+    let bvt_balance = modules
+        .bank
+        .query_balance(&QueryBalanceRequest {
+            address: user.address(),
+            denom: format!("factory/{}/BVT", test_env.contract_addr),
+        })
+        .unwrap()
+        .balance
+        .unwrap()
+        .amount
+        .parse::<u128>()
+        .unwrap();
+
     modules
         .wasm
         .execute(
             &test_env.contract_addr,
-            &Leave { address: None },
-            &[],
+            &Deposit(DepositMsg::Burn {
+                address: None,
+                amount: None,
+            }),
+            &[coin(
+                bvt_balance,
+                format!("factory/{}/BVT", test_env.contract_addr),
+            )],
             &user,
         )
         .unwrap();
@@ -790,42 +816,75 @@ fn test_queries() {
 
     cycle_positions(&test_env, &modules, false);
 
+    let bvt_balance = modules
+        .bank
+        .query_balance(&QueryBalanceRequest {
+            address: test_env.users[0].address(),
+            denom: format!("factory/{}/BVT", test_env.contract_addr),
+        })
+        .unwrap()
+        .balance
+        .unwrap()
+        .amount
+        .parse::<u128>()
+        .unwrap();
+
     modules
         .wasm
         .execute(
             &test_env.contract_addr,
-            &Leave { address: None },
-            &[],
+            &Deposit(DepositMsg::Burn {
+                address: None,
+                amount: None,
+            }),
+            &[coin(
+                bvt_balance,
+                format!("factory/{}/BVT", test_env.contract_addr),
+            )],
             &test_env.users[0],
         )
         .unwrap();
 
-    let pendings_exits: Vec<Addr> = modules
+    let pendings_exits: Vec<AccountResponse> = modules
         .wasm
-        .query(&test_env.contract_addr, &AccountsPendingExit {})
+        .query(
+            &test_env.contract_addr,
+            &AccountStatus(AccountQuery::Burn(AccountQueryParams {
+                address: None,
+                start_after: None,
+                limit: None,
+            })),
+        )
         .unwrap();
 
     assert_eq!(pendings_exits.len(), 1);
 
     // checks if user ratio converted to dollars accurately represents the funds they leave with
-    let user_ratio: Decimal = modules
-        .wasm
-        .query(
-            &test_env.contract_addr,
-            &VaultRatio {
-                address: Addr::unchecked(test_env.users[0].address()),
-            },
-        )
+    // user ratio is determined by their share of the vault token supply
+    let supply = modules
+        .bank
+        .query_total_supply(&QueryTotalSupplyRequest { pagination: None })
+        .unwrap()
+        .supply
+        .iter()
+        .find(|c| c.denom == format!("factory/{}/BVT", test_env.contract_addr))
+        .unwrap()
+        .amount
+        .parse::<u128>()
         .unwrap();
 
-    let contract_balance: TotalAssetsResponse = modules
+    let user_ratio = Decimal::from_ratio(bvt_balance, supply);
+
+    println!("user ratio: {}", user_ratio);
+
+    let contract_balance: Vec<Coin> = modules
         .wasm
-        .query(&test_env.contract_addr, &TotalActiveAssets {})
+        .query(&test_env.contract_addr, &LockedAssets {})
         .unwrap();
 
-    let contract_dollar_value: Decimal = Decimal::new(contract_balance.asset0.amount)
+    let contract_dollar_value: Decimal = Decimal::new(contract_balance[0].amount)
         .mul(get_price("uosmo"))
-        + Decimal::new(contract_balance.asset1.amount).mul(get_price("uatom"));
+        + Decimal::new(contract_balance[1].amount).mul(get_price("uatom"));
 
     let uosmo_balance =
         Uint128::new(user_balance_list(&test_env, &modules, "uosmo".to_string())[0]);
@@ -854,26 +913,25 @@ fn test_queries() {
     );
 
     // check that TotalAssetsResponse return the value of assets we can use
-    let new_contract_balance: TotalAssetsResponse = modules
+    let new_contract_balance: Vec<Coin> = modules
         .wasm
-        .query(&test_env.contract_addr, &TotalActiveAssets {})
+        .query(&test_env.contract_addr, &LockedAssets {})
         .unwrap();
+
+    let coins = Coins::try_from(new_contract_balance).unwrap();
 
     modules
         .wasm
         .execute(
             &test_env.contract_addr,
-            &CreatePosition {
+            &ManagePosition(CreatePosition {
                 lower_tick: -10000,
                 upper_tick: 10000,
-                tokens_provided: vec![
-                    new_contract_balance.asset1.clone(),
-                    new_contract_balance.asset0.clone(),
-                ],
+                tokens_provided: coins.into(),
                 token_min_amount0: "1".to_string(),
                 token_min_amount1: "1".to_string(),
                 swap: None,
-            },
+            }),
             &[],
             &test_env.admin,
         )
