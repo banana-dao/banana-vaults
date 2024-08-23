@@ -389,6 +389,9 @@ fn execute_compound_rewards(
 ) -> Result<Response, ContractError> {
     let mut messages: Vec<CosmosMsg> = vec![];
     let mut rewards = Coins::try_from(UNCOMPOUNDED_REWARDS.load(deps.storage)?).unwrap_or_default();
+    let commission_rate = COMMISSION_RATE.load(deps.storage)?;
+
+    let mut commissions = Coins::default();
 
     for swap in swaps {
         let mut total_in = Uint128::zero();
@@ -411,13 +414,23 @@ fn execute_compound_rewards(
         // make sure the denom out is one of the vault assets
         let vault_assets = VAULT_ASSETS.load(deps.storage)?;
 
-        if let Some(last_pool) = swap.routes.first().and_then(|route| route.pools.last()) {
-            if last_pool.token_out_denom != vault_assets.0.denom
-                && last_pool.token_out_denom != vault_assets.1.denom
-            {
-                return Err(ContractError::CannotSwapIntoAsset);
-            }
+        let token_out_denom = swap
+            .routes
+            .first()
+            .and_then(|route| route.pools.last())
+            .map(|last_pool| &last_pool.token_out_denom)
+            .unwrap()
+            .to_string();
+
+        if token_out_denom != vault_assets.0.denom && token_out_denom != vault_assets.1.denom {
+            return Err(ContractError::CannotSwapIntoAsset);
         }
+
+        // calculate the commission from the swapped rewards
+        commissions.add(Coin {
+            denom: token_out_denom,
+            amount: Uint128::from_str(&swap.token_out_min_amount)?.mul_floor(commission_rate),
+        })?;
 
         messages.push(
             MsgSplitRouteSwapExactAmountIn {
@@ -429,6 +442,14 @@ fn execute_compound_rewards(
             .into(),
         );
     }
+
+    messages.push(
+        BankMsg::Send {
+            to_address: CONFIG.load(deps.storage)?.commission_receiver.into_string(),
+            amount: commissions.into(),
+        }
+        .into(),
+    );
 
     UNCOMPOUNDED_REWARDS.save(deps.storage, &rewards.to_vec())?;
 
