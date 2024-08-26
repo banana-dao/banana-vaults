@@ -494,13 +494,6 @@ fn execute_deposit_for_mint(
         return Err(ContractError::CapReached);
     }
 
-    // Check if user is already waiting to burn
-    if ACCOUNTS_PENDING_BURN.has(deps.storage, info.sender.clone()) {
-        return Err(ContractError::AccountPendingBurn {
-            address: info.sender.to_string(),
-        });
-    }
-
     let vault_assets = VAULT_ASSETS.load(deps.storage)?;
     let config = CONFIG.load(deps.storage)?;
     let mint_assets = verify_mint_funds(
@@ -539,69 +532,45 @@ fn execute_deposit_for_burn(
         return Err(ContractError::VaultHalted);
     }
 
-    let mut burn_address = info.sender.clone();
-    let mut burn_amount = info.funds[0].amount;
+    let burn_address = address.unwrap_or(info.sender.clone());
+
+    // load any pending burn amount for the target user
+    let mut burn_amount = ACCOUNTS_PENDING_BURN
+        .may_load(deps.storage, burn_address.clone())?
+        .unwrap_or_default();
 
     let mut messages = vec![];
     let mut attributes = vec![];
 
-    // If an address is provided, we use that instead of the sender and execute a forced burn
-    if let Some(addr) = address {
+    // If the target address isn't the sender, we execute a forced burn
+    if burn_address != info.sender {
         if info.sender != OPERATOR.load(deps.storage)? {
             return Err(ContractError::CannotForceExit);
         }
 
-        let msgs = prepare_force_burn(&deps, env, addr.as_str(), amount)?;
+        let msgs = prepare_force_burn(&deps, env, burn_address.as_str(), amount)?;
         messages.extend(msgs);
         attributes.push(attr("action", "banana_vault_force_burn"));
 
-        burn_address = addr;
-        burn_amount = amount.unwrap();
+        burn_amount += amount.unwrap();
     } else {
+        // if this isn't a forced burn we check if a burn is already pending for this user
+        if !burn_amount.is_zero() {
+            return Err(ContractError::AccountPendingBurn {
+                address: info.sender.to_string(),
+            });
+        }
+
         // make sure valid funds are sent
         verify_burn_funds(deps.storage, &info.funds)?;
+        burn_amount = info.funds[0].amount;
         attributes.push(attr("action", "banana_vault_deposit_for_burn"));
     }
 
     attributes.push(attr("address", burn_address.to_string()));
     attributes.push(attr("amount", burn_amount));
 
-    // if this account is already in the burn list, we add the funds to the existing amount
-    if let Some(pending_burn) =
-        ACCOUNTS_PENDING_BURN.may_load(deps.storage, burn_address.clone())?
-    {
-        ACCOUNTS_PENDING_BURN.save(
-            deps.storage,
-            burn_address.clone(),
-            &(pending_burn + burn_amount),
-        )?;
-    } else {
-        ACCOUNTS_PENDING_BURN.save(deps.storage, burn_address.clone(), &burn_amount)?;
-    }
-
-    // We return any pending joining assets immediately
-    if let Some((mut pending_mint, _)) =
-        ACCOUNTS_PENDING_MINT.may_load(deps.storage, burn_address.clone())?
-    {
-        ASSETS_PENDING_MINT.update(deps.storage, |mut assets_pending| -> StdResult<_> {
-            assets_pending[0].amount -= pending_mint[0].amount;
-            assets_pending[1].amount -= pending_mint[1].amount;
-            Ok(assets_pending)
-        })?;
-
-        ACCOUNTS_PENDING_MINT.remove(deps.storage, info.sender.clone());
-
-        // Remove empty amounts to avoid sending empty funds in bank msg
-        pending_mint.retain(|f| f.amount.ne(&Uint128::zero()));
-
-        messages.push(
-            BankMsg::Send {
-                to_address: burn_address.to_string(),
-                amount: pending_mint,
-            }
-            .into(),
-        );
-    }
+    ACCOUNTS_PENDING_BURN.save(deps.storage, burn_address.clone(), &burn_amount)?;
 
     // if vault is terminated the burn will be processed immediately
     if TERMINATED.load(deps.storage)? {

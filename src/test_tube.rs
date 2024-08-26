@@ -1031,10 +1031,24 @@ fn test_cancel_burn() {
                 address: None,
                 amount: None
             }),
-            &[coin(bvt_balance, bvt_denom.clone())],
+            &[coin(bvt_balance - 1_000_000, bvt_denom.clone())],
             &test_env.users[0],
         )
         .is_ok());
+
+    // make sure they can't do another burn while the first is pending
+    assert!(modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &Deposit(DepositMsg::Burn {
+                address: None,
+                amount: None
+            }),
+            &[coin(1_000_000, bvt_denom.clone())],
+            &test_env.users[0],
+        )
+        .is_err());
 
     assert!(modules
         .wasm
