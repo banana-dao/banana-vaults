@@ -1050,6 +1050,21 @@ fn test_cancel_burn() {
         )
         .is_err());
 
+    // test the pending burn query
+    let pending_burn: Vec<AccountResponse> = modules
+        .wasm
+        .query(
+            &test_env.contract_addr,
+            &AccountStatus(AccountQuery::Burn(AccountQueryParams {
+                address: Some(Addr::unchecked(test_env.users[0].address())),
+                start_after: None,
+                limit: None,
+            })),
+        )
+        .unwrap();
+
+    assert!(pending_burn[0].amount[0].amount.u128() == bvt_balance - 1_000_000);
+
     assert!(modules
         .wasm
         .execute(

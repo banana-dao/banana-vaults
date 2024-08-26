@@ -100,8 +100,8 @@ pub fn instantiate(
     verify_pool(
         &deps.as_ref(),
         msg.pool_id,
-        msg.asset0.denom.clone(),
-        msg.asset1.denom.clone(),
+        msg.asset0.denom.as_str(),
+        msg.asset1.denom.as_str(),
     )?;
 
     POOL_ID.save(deps.storage, &msg.pool_id)?;
@@ -110,8 +110,8 @@ pub fn instantiate(
     // Check that funds sent match with config
     verify_mint_funds(
         &info.funds,
-        msg.asset0.denom.clone(),
-        msg.asset1.denom.clone(),
+        msg.asset0.denom.as_str(),
+        msg.asset1.denom.as_str(),
         &msg.min_asset0,
         &msg.min_asset1,
     )?;
@@ -329,8 +329,8 @@ fn execute_modify_pool_id(deps: DepsMut, new_pool_id: u64) -> Result<Response, C
     verify_pool(
         &deps.as_ref(),
         new_pool_id,
-        vault_assets.0.denom,
-        vault_assets.1.denom,
+        vault_assets.0.denom.as_str(),
+        vault_assets.1.denom.as_str(),
     )?;
 
     POOL_ID.save(deps.storage, &new_pool_id)?;
@@ -414,9 +414,9 @@ fn execute_compound_rewards(
             return Err(ContractError::CannotSwapMoreThanAvailable {
                 denom: swap.token_in_denom,
             });
-        } else {
-            rewards.sub(coin(total_in.u128(), swap.token_in_denom.clone()))?;
         }
+
+        rewards.sub(coin(total_in.u128(), swap.token_in_denom.clone()))?;
 
         // make sure the denom out is one of the vault assets
         let vault_assets = VAULT_ASSETS.load(deps.storage)?;
@@ -498,8 +498,8 @@ fn execute_deposit_for_mint(
     let config = CONFIG.load(deps.storage)?;
     let mint_assets = verify_mint_funds(
         &info.funds,
-        vault_assets.0.denom,
-        vault_assets.1.denom,
+        vault_assets.0.denom.as_str(),
+        vault_assets.1.denom.as_str(),
         &config.min_asset0,
         &config.min_asset1,
     )?;
@@ -532,7 +532,7 @@ fn execute_deposit_for_burn(
         return Err(ContractError::VaultHalted);
     }
 
-    let burn_address = address.unwrap_or(info.sender.clone());
+    let burn_address = address.unwrap_or_else(|| info.sender.clone());
 
     // load any pending burn amount for the target user
     let mut burn_amount = ACCOUNTS_PENDING_BURN
@@ -542,8 +542,20 @@ fn execute_deposit_for_burn(
     let mut messages = vec![];
     let mut attributes = vec![];
 
+    // if this isn't a forced burn we check if a burn is already pending for this user
+    if burn_address == info.sender {
+        if !burn_amount.is_zero() {
+            return Err(ContractError::AccountPendingBurn {
+                address: info.sender.to_string(),
+            });
+        }
+
+        // make sure valid funds are sent
+        burn_amount = verify_burn_funds(deps.storage, &info.funds)?;
+        attributes.push(attr("action", "banana_vault_deposit_for_burn"));
+
     // If the target address isn't the sender, we execute a forced burn
-    if burn_address != info.sender {
+    } else {
         if info.sender != OPERATOR.load(deps.storage)? {
             return Err(ContractError::CannotForceExit);
         }
@@ -553,24 +565,12 @@ fn execute_deposit_for_burn(
         attributes.push(attr("action", "banana_vault_force_burn"));
 
         burn_amount += amount.unwrap();
-    } else {
-        // if this isn't a forced burn we check if a burn is already pending for this user
-        if !burn_amount.is_zero() {
-            return Err(ContractError::AccountPendingBurn {
-                address: info.sender.to_string(),
-            });
-        }
-
-        // make sure valid funds are sent
-        verify_burn_funds(deps.storage, &info.funds)?;
-        burn_amount = info.funds[0].amount;
-        attributes.push(attr("action", "banana_vault_deposit_for_burn"));
     }
 
     attributes.push(attr("address", burn_address.to_string()));
     attributes.push(attr("amount", burn_amount));
 
-    ACCOUNTS_PENDING_BURN.save(deps.storage, burn_address.clone(), &burn_amount)?;
+    ACCOUNTS_PENDING_BURN.save(deps.storage, burn_address, &burn_amount)?;
 
     // if vault is terminated the burn will be processed immediately
     if TERMINATED.load(deps.storage)? {
@@ -655,10 +655,10 @@ fn execute_create_position(
 
     let mut balance_asset0 = deps
         .querier
-        .query_balance(env.contract.address.clone(), vault_assets.0.denom.clone())?;
+        .query_balance(env.contract.address.clone(), vault_assets.0.denom)?;
     let mut balance_asset1 = deps
         .querier
-        .query_balance(env.contract.address.clone(), vault_assets.1.denom.clone())?;
+        .query_balance(env.contract.address.clone(), vault_assets.1.denom)?;
 
     // execute swap if provided
     if let Some(swap) = swap {
@@ -1025,8 +1025,8 @@ fn query_estimate_mint(deps: Deps, env: &Env, coins: &[Coin]) -> StdResult<Vec<C
 
     let mint_funds: Vec<Coin> = verify_mint_funds(
         coins,
-        vault_assets.0.denom,
-        vault_assets.1.denom,
+        vault_assets.0.denom.as_str(),
+        vault_assets.1.denom.as_str(),
         &config.min_asset0,
         &config.min_asset1,
     )
@@ -1107,11 +1107,9 @@ fn query_pending_burn(
 
     let pending_burn: Vec<(Addr, Uint128)> = match address {
         Some(addr) => {
-            if let Some(pending) = ACCOUNTS_PENDING_BURN.may_load(deps.storage, addr.clone())? {
-                vec![(addr, pending)]
-            } else {
-                vec![]
-            }
+            ACCOUNTS_PENDING_BURN
+                .may_load(deps.storage, addr.clone())?
+                .map_or_else(Vec::new, |pending| vec![(addr, pending)])
         }
         None => ACCOUNTS_PENDING_BURN
             .range(deps.storage, start, None, Order::Ascending)
@@ -1230,8 +1228,8 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response
 fn verify_pool(
     deps: &Deps,
     pool_id: u64,
-    denom0: String,
-    denom1: String,
+    denom0: &str,
+    denom1: &str,
 ) -> Result<(), ContractError> {
     let pool: Pool = match PoolmanagerQuerier::new(&deps.querier).pool(pool_id)?.pool {
         Some(pool) => {
@@ -1261,8 +1259,8 @@ fn verify_pool(
 
 fn verify_mint_funds(
     funds: &[Coin],
-    denom0: String,
-    denom1: String,
+    denom0: &str,
+    denom1: &str,
     min0: &Uint128,
     min1: &Uint128,
 ) -> Result<Vec<Coin>, ContractError> {
@@ -1270,7 +1268,7 @@ fn verify_mint_funds(
         return Err(ContractError::NoFunds);
     }
 
-    let mut assets = vec![coin(0, denom0.clone()), coin(0, denom1.clone())];
+    let mut assets = vec![coin(0, denom0), coin(0, denom1)];
 
     for fund in funds {
         if fund.denom == denom0 {
@@ -1302,7 +1300,7 @@ fn check_deposit_min(min_deposit: &Uint128, coin: &Coin) -> Result<(), ContractE
     Ok(())
 }
 
-fn verify_burn_funds(storage: &dyn Storage, funds: &[Coin]) -> Result<(), ContractError> {
+fn verify_burn_funds(storage: &dyn Storage, funds: &[Coin]) -> Result<Uint128, ContractError> {
     if funds.is_empty() {
         return Err(ContractError::NoFunds);
     }
@@ -1323,7 +1321,7 @@ fn verify_burn_funds(storage: &dyn Storage, funds: &[Coin]) -> Result<(), Contra
             min: min_redemption.to_string(),
         })
     } else {
-        Ok(())
+        Ok(funds[0].amount)
     }
 }
 
@@ -1819,7 +1817,7 @@ fn process_burns(
         attributes.push(attr("address", address.to_string()));
         attributes.push(attr("burned", to_burn.to_string()));
         for amount in amount_to_send {
-            attributes.push(attr("received", format!("{}", amount)));
+            attributes.push(attr("received", format!("{amount}")));
         }
 
         total_burned += to_burn;
