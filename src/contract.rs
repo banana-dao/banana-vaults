@@ -279,7 +279,7 @@ pub fn execute(
         },
         ExecuteMsg::Cancel(cancel_msg) => match cancel_msg {
             CancelMsg::Mint => execute_cancel_mint(deps, &info),
-            CancelMsg::Burn => execute_cancel_burn(deps, &info),
+            CancelMsg::Burn { address } => execute_cancel_burn(deps, &info, address),
         },
         ExecuteMsg::Unlock => execute_unlock(deps, &env, &info),
     }
@@ -613,13 +613,21 @@ fn execute_cancel_mint(deps: DepsMut, info: &MessageInfo) -> Result<Response, Co
     }
 }
 
-fn execute_cancel_burn(deps: DepsMut, info: &MessageInfo) -> Result<Response, ContractError> {
-    if let Some(pending_burn) = ACCOUNTS_PENDING_BURN.may_load(deps.storage, info.sender.clone())? {
-        ACCOUNTS_PENDING_BURN.remove(deps.storage, info.sender.clone());
+fn execute_cancel_burn(
+    deps: DepsMut,
+    info: &MessageInfo,
+    address: Addr,
+) -> Result<Response, ContractError> {
+    if OPERATOR.load(deps.storage)? != info.sender {
+        return Err(ContractError::Unauthorized);
+    }
+
+    if let Some(pending_burn) = ACCOUNTS_PENDING_BURN.may_load(deps.storage, address.clone())? {
+        ACCOUNTS_PENDING_BURN.remove(deps.storage, address.clone());
 
         Ok(Response::new()
             .add_message(BankMsg::Send {
-                to_address: info.sender.to_string(),
+                to_address: address.to_string(),
                 amount: vec![Coin {
                     denom: VAULT_DENOM.load(deps.storage)?,
                     amount: pending_burn,
@@ -628,7 +636,7 @@ fn execute_cancel_burn(deps: DepsMut, info: &MessageInfo) -> Result<Response, Co
             .add_attribute("action", "banana_vault_cancel_burn"))
     } else {
         Err(ContractError::NoPendingBurn {
-            address: info.sender.to_string(),
+            address: address.to_string(),
         })
     }
 }
@@ -1106,11 +1114,9 @@ fn query_pending_burn(
     let start = start_after.map(Bound::exclusive);
 
     let pending_burn: Vec<(Addr, Uint128)> = match address {
-        Some(addr) => {
-            ACCOUNTS_PENDING_BURN
-                .may_load(deps.storage, addr.clone())?
-                .map_or_else(Vec::new, |pending| vec![(addr, pending)])
-        }
+        Some(addr) => ACCOUNTS_PENDING_BURN
+            .may_load(deps.storage, addr.clone())?
+            .map_or_else(Vec::new, |pending| vec![(addr, pending)]),
         None => ACCOUNTS_PENDING_BURN
             .range(deps.storage, start, None, Order::Ascending)
             .take(limit as usize)
@@ -1225,12 +1231,7 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response
 }
 
 // Helpers
-fn verify_pool(
-    deps: &Deps,
-    pool_id: u64,
-    denom0: &str,
-    denom1: &str,
-) -> Result<(), ContractError> {
+fn verify_pool(deps: &Deps, pool_id: u64, denom0: &str, denom1: &str) -> Result<(), ContractError> {
     let pool: Pool = match PoolmanagerQuerier::new(&deps.querier).pool(pool_id)?.pool {
         Some(pool) => {
             if pool

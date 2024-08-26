@@ -131,7 +131,7 @@ pub enum DepositMsg {
 #[cw_serde]
 pub enum CancelMsg {
     Mint,
-    Burn,
+    Burn { address: Addr },
 }
 
 #[cw_serde]

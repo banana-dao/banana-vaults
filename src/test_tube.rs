@@ -1065,13 +1065,28 @@ fn test_cancel_burn() {
 
     assert!(pending_burn[0].amount[0].amount.u128() == bvt_balance - 1_000_000);
 
+    // the operator must cancel the burn order
     assert!(modules
         .wasm
         .execute(
             &test_env.contract_addr,
-            &Cancel(CancelMsg::Burn),
+            &Cancel(CancelMsg::Burn {
+                address: Addr::unchecked(&test_env.users[0].address())
+            }),
             &[],
             &test_env.users[0],
+        )
+        .is_err());
+
+    assert!(modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &Cancel(CancelMsg::Burn {
+                address: Addr::unchecked(&test_env.users[0].address())
+            }),
+            &[],
+            &test_env.admin,
         )
         .is_ok());
 
