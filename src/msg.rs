@@ -56,6 +56,8 @@ pub enum ExecuteMsg {
     ManagePosition(PositionMsg),
     // Join/leave vault
     Deposit(DepositMsg),
+    // Cancel pending join/leave
+    Cancel(CancelMsg),
     // Dead man switch. Can be called to unlock the vault and allow manual redemptions after 14 days of operator inactivity
     Unlock,
 }
@@ -110,6 +112,9 @@ pub enum PositionMsg {
         liquidity_amount: String,
         override_uptime: Option<bool>,
     },
+    ClaimRewards {
+        position_id: u64,
+    },
 }
 
 #[cw_serde]
@@ -121,6 +126,12 @@ pub enum DepositMsg {
         address: Option<Addr>,
         amount: Option<Uint128>,
     },
+}
+
+#[cw_serde]
+pub enum CancelMsg {
+    Mint,
+    Burn,
 }
 
 #[cw_serde]

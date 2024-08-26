@@ -1,9 +1,9 @@
 use crate::{
     error::ContractError,
     msg::{
-        AccountQuery, AccountResponse, DepositMsg, DepositQuery, Environment, ExecuteMsg,
-        InstantiateMsg, MigrateMsg, ModifyMsg, PositionMsg, QueryMsg, RewardQuery, State,
-        StateQuery, Swap, VaultMsg, WhitelistResponse,
+        AccountQuery, AccountResponse, CancelMsg, DepositMsg, DepositQuery, Environment,
+        ExecuteMsg, InstantiateMsg, MigrateMsg, ModifyMsg, PositionMsg, QueryMsg, RewardQuery,
+        State, StateQuery, Swap, VaultMsg, WhitelistResponse,
     },
     state::{
         Config, ACCOUNTS_PENDING_BURN, ACCOUNTS_PENDING_MINT, ASSETS_PENDING_MINT, CAP_REACHED,
@@ -266,6 +266,9 @@ pub fn execute(
                     liquidity_amount,
                     override_uptime,
                 ),
+                PositionMsg::ClaimRewards { position_id } => {
+                    execute_claim_rewards(deps, &env, position_id)
+                }
             }
         }
         ExecuteMsg::Deposit(deposit_msg) => match deposit_msg {
@@ -273,6 +276,10 @@ pub fn execute(
             DepositMsg::Burn { address, amount } => {
                 execute_deposit_for_burn(deps, &env, &info, address, amount)
             }
+        },
+        ExecuteMsg::Cancel(cancel_msg) => match cancel_msg {
+            CancelMsg::Mint => execute_cancel_mint(deps, &info),
+            CancelMsg::Burn => execute_cancel_burn(deps, &info),
         },
         ExecuteMsg::Unlock => execute_unlock(deps, &env, &info),
     }
@@ -473,6 +480,13 @@ fn execute_deposit_for_mint(
         return Err(ContractError::VaultHalted);
     }
 
+    // check if user already waiting to mint
+    if ACCOUNTS_PENDING_MINT.has(deps.storage, info.sender.clone()) {
+        return Err(ContractError::AccountPendingMint {
+            address: info.sender.to_string(),
+        });
+    }
+
     // Check if vault cap has been reached and user is not whitelisted to exceed it
     if CAP_REACHED.load(deps.storage)?
         && !WHITELISTED_DEPOSITORS.has(deps.storage, info.sender.clone())
@@ -504,28 +518,11 @@ fn execute_deposit_for_mint(
     assets_pending[1].amount += mint_assets[1].amount;
 
     ASSETS_PENDING_MINT.save(deps.storage, &assets_pending)?;
-
-    let min_out = min_out.unwrap_or_default();
-
-    // Check if user added to the current pending amount or if it's the first time he added
-    if let Some((mut current_funds, current_min_out)) =
-        ACCOUNTS_PENDING_MINT.may_load(deps.storage, info.sender.clone())?
-    {
-        current_funds[0].amount += mint_assets[0].amount;
-        current_funds[1].amount += mint_assets[1].amount;
-
-        ACCOUNTS_PENDING_MINT.save(
-            deps.storage,
-            info.sender.clone(),
-            &(current_funds, current_min_out + min_out),
-        )?;
-    } else {
-        ACCOUNTS_PENDING_MINT.save(
-            deps.storage,
-            info.sender.clone(),
-            &(mint_assets.clone(), min_out),
-        )?;
-    }
+    ACCOUNTS_PENDING_MINT.save(
+        deps.storage,
+        info.sender.clone(),
+        &(mint_assets, min_out.unwrap_or_default()),
+    )?;
 
     Ok(Response::new().add_attribute("action", "banana_vault_deposit_for_mint"))
 }
@@ -586,12 +583,13 @@ fn execute_deposit_for_burn(
     if let Some((mut pending_mint, _)) =
         ACCOUNTS_PENDING_MINT.may_load(deps.storage, burn_address.clone())?
     {
-        let mut assets_pending = ASSETS_PENDING_MINT.load(deps.storage)?;
-        assets_pending[0].amount -= pending_mint[0].amount;
-        assets_pending[1].amount -= pending_mint[1].amount;
+        ASSETS_PENDING_MINT.update(deps.storage, |mut assets_pending| -> StdResult<_> {
+            assets_pending[0].amount -= pending_mint[0].amount;
+            assets_pending[1].amount -= pending_mint[1].amount;
+            Ok(assets_pending)
+        })?;
 
-        ASSETS_PENDING_MINT.save(deps.storage, &assets_pending)?;
-        ACCOUNTS_PENDING_MINT.remove(deps.storage, burn_address.clone());
+        ACCOUNTS_PENDING_MINT.remove(deps.storage, info.sender.clone());
 
         // Remove empty amounts to avoid sending empty funds in bank msg
         pending_mint.retain(|f| f.amount.ne(&Uint128::zero()));
@@ -615,6 +613,55 @@ fn execute_deposit_for_burn(
     Ok(Response::new()
         .add_messages(messages)
         .add_attributes(attributes))
+}
+
+fn execute_cancel_mint(deps: DepsMut, info: &MessageInfo) -> Result<Response, ContractError> {
+    // refund user's assets and remove from pending
+    if let Some((mut pending_mint, _)) =
+        ACCOUNTS_PENDING_MINT.may_load(deps.storage, info.sender.clone())?
+    {
+        ASSETS_PENDING_MINT.update(deps.storage, |mut assets_pending| -> StdResult<_> {
+            assets_pending[0].amount -= pending_mint[0].amount;
+            assets_pending[1].amount -= pending_mint[1].amount;
+            Ok(assets_pending)
+        })?;
+
+        ACCOUNTS_PENDING_MINT.remove(deps.storage, info.sender.clone());
+
+        // Remove empty amounts to avoid sending empty funds in bank msg
+        pending_mint.retain(|f| f.amount.ne(&Uint128::zero()));
+
+        Ok(Response::new()
+            .add_message(BankMsg::Send {
+                to_address: info.sender.to_string(),
+                amount: pending_mint,
+            })
+            .add_attribute("action", "banana_vault_cancel_mint"))
+    } else {
+        Err(ContractError::NoPendingMint {
+            address: info.sender.to_string(),
+        })
+    }
+}
+
+fn execute_cancel_burn(deps: DepsMut, info: &MessageInfo) -> Result<Response, ContractError> {
+    if let Some(pending_burn) = ACCOUNTS_PENDING_BURN.may_load(deps.storage, info.sender.clone())? {
+        ACCOUNTS_PENDING_BURN.remove(deps.storage, info.sender.clone());
+
+        Ok(Response::new()
+            .add_message(BankMsg::Send {
+                to_address: info.sender.to_string(),
+                amount: vec![Coin {
+                    denom: VAULT_DENOM.load(deps.storage)?,
+                    amount: pending_burn,
+                }],
+            })
+            .add_attribute("action", "banana_vault_cancel_burn"))
+    } else {
+        Err(ContractError::NoPendingBurn {
+            address: info.sender.to_string(),
+        })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -811,6 +858,22 @@ fn execute_withdraw_position(
     Ok(Response::new()
         .add_messages(messages)
         .add_attributes(attributes))
+}
+
+fn execute_claim_rewards(
+    deps: DepsMut,
+    env: &Env,
+    position_id: u64,
+) -> Result<Response, ContractError> {
+    // get the pending rewards info. override_uptime should be false to prevent forfeiture
+    let rewards = collect_rewards(&deps, env.contract.address.to_string(), position_id, false)?;
+
+    UNCOMPOUNDED_REWARDS.save(deps.storage, &rewards.non_vault)?;
+    COMMISSION_REWARDS.save(deps.storage, &rewards.commission)?;
+
+    Ok(Response::new()
+        .add_messages(rewards.messages)
+        .add_attributes(rewards.attributes))
 }
 
 fn execute_process_mints(deps: DepsMut, env: &Env) -> Result<Response, ContractError> {
@@ -1439,7 +1502,7 @@ struct Rewards {
 }
 
 // collect_rewards should be called upon any position change
-// however we only need to actually execute the msgs when adding to position
+// however we only need to actually execute the msgs when adding to position or claiming
 fn collect_rewards(
     deps: &DepsMut,
     sender: String,

@@ -1,6 +1,6 @@
 use crate::msg::{
-    AccountQuery, AccountQueryParams, AccountResponse, DepositMsg, Environment,
-    ExecuteMsg::{Deposit, ManagePosition, ManageVault},
+    AccountQuery, AccountQueryParams, AccountResponse, CancelMsg, DepositMsg, Environment,
+    ExecuteMsg::{Cancel, Deposit, ManagePosition, ManageVault},
     InstantiateMsg,
     PositionMsg::{CreatePosition, WithdrawPosition},
     QueryMsg::{AccountStatus, LockedAssets},
@@ -936,4 +936,118 @@ fn test_queries() {
             &test_env.admin,
         )
         .unwrap();
+}
+
+#[test]
+fn test_cancel_mint() {
+    let test_env = setup_contract(get_asset("uatom"));
+    let modules = get_modules(&test_env);
+
+    // simulate some join activity
+    execute_joins(
+        &test_env,
+        &modules,
+        JOINS[0],
+        &"uosmo".to_string(),
+        1_000_000,
+    );
+
+    cycle_positions(&test_env, &modules, false);
+
+    // get user's pre deposit balance
+    let start_uosmo_balance =
+        Uint128::new(user_balance_list(&test_env, &modules, "uosmo".to_string())[0]);
+    let start_uatom_balance =
+        Uint128::new(user_balance_list(&test_env, &modules, "uatom".to_string())[0]);
+
+    // let user[0] make a deposit for mint
+    assert!(modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &Deposit(DepositMsg::Mint { min_out: None }),
+            &[coin(53_000_000, "uatom"), coin(500_000_000, "uosmo")],
+            &test_env.users[0],
+        )
+        .is_ok());
+
+    // make sure user[0] can't join again
+    assert!(modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &Deposit(DepositMsg::Mint { min_out: None }),
+            &[coin(53_000_000, "uatom"), coin(500_000_000, "uosmo")],
+            &test_env.users[0],
+        )
+        .is_err());
+
+    // cancel user's mint
+    assert!(modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &Cancel(CancelMsg::Mint),
+            &[],
+            &test_env.users[0],
+        )
+        .is_ok());
+
+    // make sure post cancel balance is consistent, minus tx fees
+    let uosmo_balance =
+        Uint128::new(user_balance_list(&test_env, &modules, "uosmo".to_string())[0]);
+    let uatom_balance =
+        Uint128::new(user_balance_list(&test_env, &modules, "uatom".to_string())[0]);
+
+    assert!(uatom_balance == start_uatom_balance);
+    assert!(uosmo_balance == start_uosmo_balance - Uint128::from(FEE_AMOUNT * 3));
+}
+
+#[test]
+fn test_cancel_burn() {
+    let test_env = setup_contract(get_asset("uatom"));
+    let modules = get_modules(&test_env);
+
+    execute_joins(
+        &test_env,
+        &modules,
+        JOINS[0],
+        &"uosmo".to_string(),
+        1_000_000,
+    );
+
+    cycle_positions(&test_env, &modules, false);
+
+    let bvt_denom = format!("factory/{}/BVT", test_env.contract_addr);
+
+    let bvt_balance = user_balance_list(&test_env, &modules, bvt_denom.clone())[0];
+
+    // let user[0] make a deposit for burn then cancel it
+    assert!(modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &Deposit(DepositMsg::Burn {
+                address: None,
+                amount: None
+            }),
+            &[coin(bvt_balance, bvt_denom.clone())],
+            &test_env.users[0],
+        )
+        .is_ok());
+
+    assert!(modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &Cancel(CancelMsg::Burn),
+            &[],
+            &test_env.users[0],
+        )
+        .is_ok());
+
+    // make sure user got all their bvt back
+    let final_bvt_balance = user_balance_list(&test_env, &modules, bvt_denom)[0];
+
+    assert!(bvt_balance == final_bvt_balance);
 }
