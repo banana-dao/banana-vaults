@@ -982,12 +982,25 @@ fn test_cancel_mint() {
         )
         .is_err());
 
-    // cancel user's mint
+    // another user can't cancel user[0]'s mint
     assert!(modules
         .wasm
         .execute(
             &test_env.contract_addr,
-            &Cancel(CancelMsg::Mint),
+            &Cancel(CancelMsg::Mint {
+                address: Some(Addr::unchecked(&test_env.users[0].address()))
+            }),
+            &[],
+            &test_env.users[1],
+        )
+        .is_err());
+
+    // cancel user[0]'s mint
+    assert!(modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &Cancel(CancelMsg::Mint { address: None }),
             &[],
             &test_env.users[0],
         )
@@ -1001,6 +1014,29 @@ fn test_cancel_mint() {
 
     assert!(uatom_balance == start_uatom_balance);
     assert!(uosmo_balance == start_uosmo_balance - Uint128::from(FEE_AMOUNT * 3));
+
+    // deposit for mint with another user, the admin should be able to cancel it
+    modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &Deposit(DepositMsg::Mint { min_out: None }),
+            &[coin(53_000_000, "uatom"), coin(500_000_000, "uosmo")],
+            &test_env.users[1],
+        )
+        .unwrap();
+
+    assert!(modules
+        .wasm
+        .execute(
+            &test_env.contract_addr,
+            &Cancel(CancelMsg::Mint {
+                address: Some(Addr::unchecked(&test_env.users[1].address()))
+            }),
+            &[],
+            &test_env.admin,
+        )
+        .is_ok());
 }
 
 #[test]

@@ -203,7 +203,11 @@ pub fn execute(
                     }
                     ModifyMsg::Whitelist { add, remove } => execute_whitelist(deps, add, remove),
                 },
-                VaultMsg::CompoundRewards(swap) => execute_compound_rewards(deps, &env, swap),
+                VaultMsg::CompoundRewards {
+                    position_id,
+                    override_uptime,
+                    swap,
+                } => execute_compound_rewards(deps, &env, position_id, override_uptime, swap),
                 VaultMsg::CollectCommission => execute_collect_commission(deps),
                 VaultMsg::ProcessMints => execute_process_mints(deps, &env),
                 VaultMsg::ProcessBurns => execute_process_burns(deps, &env),
@@ -218,6 +222,7 @@ pub fn execute(
             if TERMINATED.load(deps.storage)? {
                 return Err(ContractError::VaultClosed);
             }
+            LAST_UPDATE.save(deps.storage, &env.block.time.seconds())?;
             match position_msg {
                 PositionMsg::CreatePosition {
                     lower_tick,
@@ -266,9 +271,6 @@ pub fn execute(
                     liquidity_amount,
                     override_uptime,
                 ),
-                PositionMsg::ClaimRewards { position_id } => {
-                    execute_claim_rewards(deps, &env, position_id)
-                }
             }
         }
         ExecuteMsg::Deposit(deposit_msg) => match deposit_msg {
@@ -278,8 +280,8 @@ pub fn execute(
             }
         },
         ExecuteMsg::Cancel(cancel_msg) => match cancel_msg {
-            CancelMsg::Mint => execute_cancel_mint(deps, &info),
-            CancelMsg::Burn { address } => execute_cancel_burn(deps, &info, address),
+            CancelMsg::Mint { address } => execute_cancel_mint(deps, &info, address),
+            CancelMsg::Burn { address } => execute_cancel_burn(deps, &info, &address),
         },
         ExecuteMsg::Unlock => execute_unlock(deps, &env, &info),
     }
@@ -392,12 +394,32 @@ fn execute_whitelist(
 fn execute_compound_rewards(
     deps: DepsMut,
     env: &Env,
+    position: Option<u64>,
+    override_uptime: Option<bool>,
     swaps: Vec<Swap>,
 ) -> Result<Response, ContractError> {
     let mut messages: Vec<CosmosMsg> = vec![];
-    let mut rewards = Coins::try_from(UNCOMPOUNDED_REWARDS.load(deps.storage)?).unwrap_or_default();
-    let commission_rate = COMMISSION_RATE.load(deps.storage)?;
+    let mut attrs: Vec<Attribute> = vec![];
 
+    // claim rewards if position is provided
+    let mut uncompounded_rewards = Coins::try_from(match position {
+        None => UNCOMPOUNDED_REWARDS.load(deps.storage)?,
+        Some(position_id) => {
+            let claim = collect_rewards(
+                &deps,
+                env.contract.address.to_string(),
+                position_id,
+                override_uptime.unwrap_or_default(),
+            )?;
+
+            COMMISSION_REWARDS.save(deps.storage, &claim.commission)?;
+            messages.extend(claim.messages);
+            attrs.extend(claim.attributes);
+            claim.non_vault
+        }
+    })?;
+
+    let commission_rate = COMMISSION_RATE.load(deps.storage)?;
     let mut commissions = Coins::default();
 
     for swap in swaps {
@@ -407,7 +429,7 @@ fn execute_compound_rewards(
             total_in += Uint128::from_str(&route.token_in_amount)?;
         }
 
-        let available_balance = rewards.amount_of(&swap.token_in_denom);
+        let available_balance = uncompounded_rewards.amount_of(&swap.token_in_denom);
 
         // we can't swap more than we have recorded as collected
         if total_in > available_balance {
@@ -416,7 +438,7 @@ fn execute_compound_rewards(
             });
         }
 
-        rewards.sub(coin(total_in.u128(), swap.token_in_denom.clone()))?;
+        uncompounded_rewards.sub(coin(total_in.u128(), swap.token_in_denom.clone()))?;
 
         // make sure the denom out is one of the vault assets
         let vault_assets = VAULT_ASSETS.load(deps.storage)?;
@@ -457,12 +479,12 @@ fn execute_compound_rewards(
         }
         .into(),
     );
+    attrs.push(attr("action", "banana_vault_compound_rewards"));
 
-    UNCOMPOUNDED_REWARDS.save(deps.storage, &rewards.to_vec())?;
+    UNCOMPOUNDED_REWARDS.save(deps.storage, &uncompounded_rewards.to_vec())?;
+    LAST_UPDATE.save(deps.storage, &env.block.time.seconds())?;
 
-    Ok(Response::new()
-        .add_messages(messages)
-        .add_attribute("action", "banana_vault_compound_rewards"))
+    Ok(Response::new().add_messages(messages).add_attributes(attrs))
 }
 
 fn execute_deposit_for_mint(
@@ -584,10 +606,24 @@ fn execute_deposit_for_burn(
         .add_attributes(attributes))
 }
 
-fn execute_cancel_mint(deps: DepsMut, info: &MessageInfo) -> Result<Response, ContractError> {
+fn execute_cancel_mint(
+    deps: DepsMut,
+    info: &MessageInfo,
+    address: Option<Addr>,
+) -> Result<Response, ContractError> {
+    let cancel_address = match address {
+        None => info.sender.clone(),
+        Some(address) => {
+            if info.sender != OPERATOR.load(deps.storage)? {
+                return Err(ContractError::Unauthorized);
+            }
+            address
+        }
+    };
+
     // refund user's assets and remove from pending
     if let Some((mut pending_mint, _)) =
-        ACCOUNTS_PENDING_MINT.may_load(deps.storage, info.sender.clone())?
+        ACCOUNTS_PENDING_MINT.may_load(deps.storage, cancel_address.clone())?
     {
         ASSETS_PENDING_MINT.update(deps.storage, |mut assets_pending| -> StdResult<_> {
             assets_pending[0].amount -= pending_mint[0].amount;
@@ -595,20 +631,20 @@ fn execute_cancel_mint(deps: DepsMut, info: &MessageInfo) -> Result<Response, Co
             Ok(assets_pending)
         })?;
 
-        ACCOUNTS_PENDING_MINT.remove(deps.storage, info.sender.clone());
+        ACCOUNTS_PENDING_MINT.remove(deps.storage, cancel_address.clone());
 
         // Remove empty amounts to avoid sending empty funds in bank msg
         pending_mint.retain(|f| f.amount.ne(&Uint128::zero()));
 
         Ok(Response::new()
             .add_message(BankMsg::Send {
-                to_address: info.sender.to_string(),
+                to_address: cancel_address.to_string(),
                 amount: pending_mint,
             })
             .add_attribute("action", "banana_vault_cancel_mint"))
     } else {
         Err(ContractError::NoPendingMint {
-            address: info.sender.to_string(),
+            address: cancel_address.to_string(),
         })
     }
 }
@@ -616,7 +652,7 @@ fn execute_cancel_mint(deps: DepsMut, info: &MessageInfo) -> Result<Response, Co
 fn execute_cancel_burn(
     deps: DepsMut,
     info: &MessageInfo,
-    address: Addr,
+    address: &Addr,
 ) -> Result<Response, ContractError> {
     if OPERATOR.load(deps.storage)? != info.sender {
         return Err(ContractError::Unauthorized);
@@ -835,22 +871,6 @@ fn execute_withdraw_position(
     Ok(Response::new()
         .add_messages(messages)
         .add_attributes(attributes))
-}
-
-fn execute_claim_rewards(
-    deps: DepsMut,
-    env: &Env,
-    position_id: u64,
-) -> Result<Response, ContractError> {
-    // get the pending rewards info. override_uptime should be false to prevent forfeiture
-    let rewards = collect_rewards(&deps, env.contract.address.to_string(), position_id, false)?;
-
-    UNCOMPOUNDED_REWARDS.save(deps.storage, &rewards.non_vault)?;
-    COMMISSION_REWARDS.save(deps.storage, &rewards.commission)?;
-
-    Ok(Response::new()
-        .add_messages(rewards.messages)
-        .add_attributes(rewards.attributes))
 }
 
 fn execute_process_mints(deps: DepsMut, env: &Env) -> Result<Response, ContractError> {
@@ -1540,7 +1560,7 @@ fn collect_rewards(
     let mut commission_coins = COMMISSION_REWARDS.load(deps.storage)?;
 
     let mut uncompounded_rewards: Coins =
-        Coins::try_from(UNCOMPOUNDED_REWARDS.load(deps.storage)?).unwrap_or_default();
+        Coins::try_from(UNCOMPOUNDED_REWARDS.load(deps.storage)?)?;
 
     let commission_rate = COMMISSION_RATE.load(deps.storage)?;
     let vault_assets = VAULT_ASSETS.load(deps.storage)?;

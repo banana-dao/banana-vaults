@@ -1,6 +1,6 @@
 use std::num::ParseIntError;
 
-use cosmwasm_std::{CheckedFromRatioError, OverflowError, StdError};
+use cosmwasm_std::{CheckedFromRatioError, CoinsError, OverflowError, StdError};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -16,6 +16,9 @@ pub enum ContractError {
 
     #[error(transparent)]
     CheckedFromRatioError(#[from] CheckedFromRatioError),
+
+    #[error(transparent)]
+    CoinsError(#[from] CoinsError),
 
     #[error("Pool {} not found", pool_id)]
     PoolNotFound { pool_id: u64 },

@@ -66,7 +66,11 @@ pub enum ExecuteMsg {
 pub enum VaultMsg {
     // Modify the vault config
     Modify(ModifyMsg),
-    CompoundRewards(Vec<Swap>),
+    CompoundRewards {
+        position_id: Option<u64>,
+        override_uptime: Option<bool>,
+        swap: Vec<Swap>,
+    },
     CollectCommission,
     // Process entries and exits
     ProcessMints,
@@ -112,9 +116,6 @@ pub enum PositionMsg {
         liquidity_amount: String,
         override_uptime: Option<bool>,
     },
-    ClaimRewards {
-        position_id: u64,
-    },
 }
 
 #[cw_serde]
@@ -130,7 +131,7 @@ pub enum DepositMsg {
 
 #[cw_serde]
 pub enum CancelMsg {
-    Mint,
+    Mint { address: Option<Addr> },
     Burn { address: Addr },
 }
 
