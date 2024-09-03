@@ -23,7 +23,6 @@ overflow-checks = true
 cosmwasm-schema = "1.5.0"
 cosmwasm-std = "1.5.0"
 cw-storage-plus = "1.2.0"
-cw-utils = "1.0.3"
 cw2 = "1.1.2"
 osmosis-std = "0.25.0"
 serde = { version = "1.0.193", features = ["derive"] }
