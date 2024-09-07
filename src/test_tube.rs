@@ -1,6 +1,6 @@
 use crate::{
     msg::{
-        ExecuteMsg::{CreatePosition, Join, Leave, ModifyConfig, WithdrawPosition},
+        ExecuteMsg::{CreatePosition, ForceExits, Join, Leave, ModifyConfig, WithdrawPosition},
         InstantiateMsg,
         QueryMsg::{AccountsPendingExit, TotalActiveAssets, VaultRatio},
         TotalAssetsResponse, VaultAsset,
@@ -879,4 +879,75 @@ fn test_queries() {
             &test_env.admin,
         )
         .unwrap();
+}
+
+#[test]
+fn test_unlock() {
+    for i in 0..6 {
+        let test_env = setup_contract(get_asset("uatom"));
+        let modules = get_modules(&test_env);
+
+        execute_joins(
+            &test_env,
+            &modules,
+            JOINS[i],
+            &"uosmo".to_string(),
+            1_000_000,
+        );
+
+        create_position(&test_env, &modules);
+
+        assert!(
+            modules
+                .cl
+                .query_user_positions(&UserPositionsRequest {
+                    address: test_env.contract_addr.clone(),
+                    pool_id: 1,
+                    pagination: None,
+                })
+                .unwrap()
+                .positions
+                .len()
+                == 1
+        );
+
+        let user = &test_env
+            .app
+            .init_account(&[Coin::new(1_000_000_000_000, "uosmo")])
+            .unwrap()
+            .with_fee_setting(FeeSetting::Custom {
+                amount: coin(3750, "uosmo"),
+                gas_limit: 1500000,
+            });
+
+        // unlocking should fail here
+        assert!(modules
+            .wasm
+            .execute(&test_env.contract_addr, &ForceExits {}, &[], &user)
+            .is_err());
+
+        // fast forward time by MAX_UPDATE_INTERVAL
+        test_env.app.increase_time(86400 * 14);
+
+        // make sure a user can unlock the vault
+        assert!(modules
+            .wasm
+            .execute(&test_env.contract_addr, &ForceExits {}, &[], &user)
+            .is_ok());
+
+        // make sure the position is fully closed
+        assert!(
+            modules
+                .cl
+                .query_user_positions(&UserPositionsRequest {
+                    address: test_env.contract_addr.clone(),
+                    pool_id: 1,
+                    pagination: None,
+                })
+                .unwrap()
+                .positions
+                .len()
+                == 0
+        );
+    }
 }
