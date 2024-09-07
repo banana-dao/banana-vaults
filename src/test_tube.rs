@@ -1,6 +1,6 @@
 use crate::msg::{
     AccountQuery, AccountQueryParams, AccountResponse, CancelMsg, DepositMsg, Environment,
-    ExecuteMsg::{Cancel, Deposit, ManagePosition, ManageVault},
+    ExecuteMsg::{Cancel, Deposit, ManagePosition, ManageVault, Unlock},
     InstantiateMsg,
     PositionMsg::{CreatePosition, WithdrawPosition},
     QueryMsg::{AccountStatus, LockedAssets},
@@ -407,7 +407,7 @@ fn create_position(test_env: &TestEnv, modules: &Modules) {
             &ManagePosition(CreatePosition {
                 lower_tick: 2000,
                 upper_tick: 3000,
-                tokens_provided: vec![coin(1, "uosmo")],
+                tokens_provided: vec![coin(1_000_000, "uosmo")],
                 token_min_amount0: "0".to_string(),
                 token_min_amount1: "0".to_string(),
                 swap: None,
@@ -1130,4 +1130,66 @@ fn test_cancel_burn() {
     let final_bvt_balance = user_balance_list(&test_env, &modules, bvt_denom)[0];
 
     assert!(bvt_balance == final_bvt_balance);
+}
+
+#[test]
+fn test_unlock() {
+    for i in 0..6 {
+        let test_env = setup_contract(get_asset("uatom"));
+        let modules = get_modules(&test_env);
+
+        execute_joins(
+            &test_env,
+            &modules,
+            JOINS[i],
+            &"uosmo".to_string(),
+            1_000_000,
+        );
+
+        create_position(&test_env, &modules);
+
+        assert!(
+            modules
+                .cl
+                .query_user_positions(&UserPositionsRequest {
+                    address: test_env.contract_addr.clone(),
+                    pool_id: 1,
+                    pagination: None,
+                })
+                .unwrap()
+                .positions
+                .len()
+                == 1
+        );
+
+        // unlocking should fail here
+        assert!(modules
+            .wasm
+            .execute(&test_env.contract_addr, &Unlock, &[], &test_env.users[0])
+            .is_err());
+
+        // fast forward time by MAX_UPDATE_INTERVAL
+        test_env.app.increase_time(86400 * 14);
+
+        // make sure a user can unlock the vault
+        assert!(modules
+            .wasm
+            .execute(&test_env.contract_addr, &Unlock, &[], &test_env.users[0])
+            .is_ok());
+
+        // make sure the position is fully closed
+        assert!(
+            modules
+                .cl
+                .query_user_positions(&UserPositionsRequest {
+                    address: test_env.contract_addr.clone(),
+                    pool_id: 1,
+                    pagination: None,
+                })
+                .unwrap()
+                .positions
+                .len()
+                == 0
+        );
+    }
 }

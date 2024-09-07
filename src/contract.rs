@@ -976,10 +976,14 @@ fn execute_unlock(deps: DepsMut, env: &Env, info: &MessageInfo) -> Result<Respon
         UNCOMPOUNDED_REWARDS.save(deps.storage, &rewards.non_vault)?;
         COMMISSION_REWARDS.save(deps.storage, &rewards.commission)?;
 
+        // position.liquidity gives us a string representing a number with a decimal point and 18 decimal places
+        // MsgWithdrawPosition takes a string representing a number without a decimal point and 18 decimal places
+        let liquidity_amount = position.liquidity.replace(".", "");
+
         let msg_withdraw_position: CosmosMsg = MsgWithdrawPosition {
             position_id: position.position_id,
             sender: env.contract.address.to_string(),
-            liquidity_amount: position.liquidity.clone(),
+            liquidity_amount,
         }
         .into();
 
