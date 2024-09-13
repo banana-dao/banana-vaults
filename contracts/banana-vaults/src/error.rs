@@ -1,6 +1,6 @@
 use std::num::ParseIntError;
 
-use cosmwasm_std::{CheckedFromRatioError, OverflowError, StdError};
+use cosmwasm_std::{CheckedFromRatioError, CoinsError, OverflowError, StdError};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -17,6 +17,9 @@ pub enum ContractError {
     #[error(transparent)]
     CheckedFromRatioError(#[from] CheckedFromRatioError),
 
+    #[error(transparent)]
+    CoinsError(#[from] CoinsError),
+
     #[error("Pool {} not found", pool_id)]
     PoolNotFound { pool_id: u64 },
 
@@ -31,6 +34,12 @@ pub enum ContractError {
 
     #[error("Mint tokens must be asset0 or asset1")]
     InvalidMintAssets,
+
+    #[error("Account {} is already pending mints", address)]
+    AccountPendingMint { address: String },
+
+    #[error("Account {} has no mint to cancel", address)]
+    NoPendingMint { address: String },
 
     #[error("Burn token must be {}", denom)]
     InvalidToken { denom: String },
@@ -94,6 +103,9 @@ pub enum ContractError {
 
     #[error("Account {} is already pending exit", address)]
     AccountPendingBurn { address: String },
+
+    #[error("Account {} has no burn to cancel", address)]
+    NoPendingBurn { address: String },
 
     #[error("Insufficient funds to burn")]
     InsufficientFundsToBurn,
