@@ -1,12 +1,24 @@
-[package]
-name = "banana-vault"
-version = "0.5.1"
-edition = "2021"
-authors = ["Banana DAO"]
+[workspace]
+members = [
+    "contracts/banana-vaults",
+    "packages/pyth-sdk-cw",
+]
+resolver = "2"
 
-[lib]
-crate-type = ["cdylib", "rlib"]
-doctest = false
+[workspace.dependencies]
+cosmos-sdk-proto = "0.20.0"
+cosmwasm-schema = "2.0.0"
+cosmwasm-std = "2.0.0"
+cw-storage-plus = "2.0.0"
+cw2 = "2.0.0"
+serde = { version = "1.0.193", features = ["derive"] }
+serde_json = "1.0.85"
+thiserror = "1.0.52"
+prost = "0.12.3"
+pyth-sdk = "0.7.0"
+pyth-sdk-cw = { path = "packages/pyth-sdk-cw" }
+osmosis-std = { git = "https://github.com/osmosis-labs/osmosis-rust" }
+osmosis-test-tube = "25.0.0"
 
 [profile.release]
 opt-level = 3
@@ -18,18 +30,3 @@ codegen-units = 1
 panic = 'abort'
 incremental = false
 overflow-checks = true
-
-[dependencies]
-cosmwasm-schema = "1.5.0"
-cosmwasm-std = "1.5.0"
-cw-storage-plus = "1.2.0"
-cw2 = "1.1.2"
-osmosis-std = "0.25.0"
-serde = { version = "1.0.193", features = ["derive"] }
-thiserror = "1.0.52"
-pyth-sdk-cw = "1.2.0"
-prost = "0.12.3"
-
-[dev-dependencies]
-osmosis-test-tube = "25.0.0"
-cosmos-sdk-proto = "0.20.0"
